@@ -153,7 +153,8 @@ recording through `run`; `--record` writes each case's `expected.jsonl`.
 
 Tell the person the folder's name, and that it is added with either:
 
-- the console: Harnesses, "Add from a session", this session, the folder; or
+- the console: open this session under Sessions, press **New harness from workspace** and give the folder. It
+  opens as a draft, where every file can be read and edited; **Install** makes it a harness; or
 - `POST /v1/harnesses` with `{"session": "<this session's id>", "path": "<folder>"}`.
 
 The session's id is in the variable `HG_SESSION`.
