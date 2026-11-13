@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""One turn of the Codex CLI (spec §8.4): start it headless, and say in Responses events what it does.
+
+`codex exec --json` prints one JSON object per line: the thread's id, then each item as it finishes (a
+message, reasoning, a command, a file change, a tool call), then the turn's usage. It does not print text
+word by word; a message arrives whole.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+CODEX = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "codex")
+
+
+def command(session):
+    """Codex is told its provider on the command line. It reads the key from the variable named in env_key:
+    that variable holds a placeholder, and the platform's proxy puts the real key in on the way out."""
+    provider = ('{name="HarnessGateway",base_url=%s,env_key="HG_PROVIDER_KEY",wire_api="responses"}'
+                % json.dumps(os.environ["HG_PROVIDER_URL"]))
+    args = [CODEX, "exec"]
+    if session:
+        args += ["resume", session]
+    return [*args, "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
+            "-c", "model_provider=hg", "-c", f"model_providers.hg={provider}", "-m", os.environ["HG_MODEL"], "-"]
+
+
+class Translator:
+    """Codex's lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.ended = False
+        self.error = None              # the last error it reported, for when it ends without a result
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "thread.started" and event.get("thread_id"):
+            self.state.set("session", event["thread_id"])
+        elif kind == "item.completed":
+            self.item(event.get("item") or {})
+        elif kind == "turn.completed":
+            counted = event.get("usage") or {}
+            self.ended = True
+            self.emit.done({"input_tokens": counted.get("input_tokens", 0),
+                            "output_tokens": counted.get("output_tokens", 0),
+                            "input_tokens_details": {"cached_tokens": counted.get("cached_input_tokens", 0)},
+                            "output_tokens_details": {"reasoning_tokens": counted.get("reasoning_output_tokens", 0)}})
+        elif kind == "turn.failed":
+            self.ended = True
+            message = (event.get("error") or {}).get("message") or self.error or "Codex reported that the turn failed."
+            self.emit.failed("turn_failed", str(message)[:2000])
+        elif kind == "error":
+            self.error = str(event.get("message", ""))
+            self.emit.log(f"codex: {self.error}")
+
+    def item(self, item):
+        kind = item.get("type")
+        if kind == "agent_message":
+            self.emit.say(item.get("text", ""))
+        elif kind == "reasoning":
+            self.emit.think(item.get("text", ""))
+        elif kind == "command_execution":
+            code = item.get("exit_code")
+            self.emit.ran(item.get("command", ""), stdout=item.get("aggregated_output", ""),
+                          exit_code=code if isinstance(code, int) else 1)
+        elif kind == "file_change":
+            for change in item.get("changes") or []:
+                path, how = change.get("path", ""), change.get("kind")
+                if how == "add":
+                    self.emit.wrote(path)
+                elif how == "delete":
+                    self.emit.deleted(path)
+                else:
+                    self.emit.edited(path)
+        elif kind == "mcp_tool_call":
+            failed = (item.get("error") or {}).get("message") if item.get("error") else None
+            result = item.get("result")
+            self.emit.called(item.get("server", ""), item.get("tool", ""), item.get("arguments"),
+                             output=None if failed or result is None else json.dumps(result), error=failed)
+        elif kind == "web_search":
+            self.emit.used("web_search", item.get("query", ""))
+        elif kind == "error":
+            self.emit.log(f"codex: {item.get('message', '')}")       # a warning it shows as an item
+
+
+def turn(request, emit, state, session):
+    cli = hgkit.Cli(command(session), env={**os.environ, "CODEX_CA_CERTIFICATE": os.environ.get("SSL_CERT_FILE", "")},
+                    stdin=request.brief())
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    hgkit.seed_mind()
+    session = state.get("session")
+    translator, code = turn(request, emit, state, session)
+    if session and not translator.ended and code != 0:
+        # Its own record of the session is gone or unusable: start a new one.
+        emit.log(f"Codex could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code = turn(request, emit, state, None)
+    if not translator.ended:
+        emit.failed("cli_exit", translator.error or f"Codex exited with code {code} without a result.")
+
+
+if __name__ == "__main__":
+    main()

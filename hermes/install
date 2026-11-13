@@ -1,0 +1,24 @@
+#!/bin/sh
+# Hermes Agent installs and updates itself, and keeps its dependencies with the home it is run under. The one
+# layout its makers ship in which a single read-only install serves many homes is their own image. So this
+# package installs nothing: it needs an environment whose image is Hermes's image, and checks that it is.
+set -eu
+VERSION=0.23.1
+
+command -v hermes >/dev/null 2>&1 || {
+  cat >&2 <<MESSAGE
+This environment's image has no hermes program.
+Hermes runs in an environment built from its makers' image. Create one, and name it in the model:
+
+  POST /v1/environments  {"name": "hermes", "image": "nousresearch/hermes-agent:v$VERSION"}
+  model: "hermes:hermes/<provider>/<model>"
+MESSAGE
+  exit 1
+}
+
+got=$(hermes --version 2>/dev/null | head -1 | sed -E 's/.* v([0-9.]+).*/\1/')
+[ "$got" = "$VERSION" ] || {
+  echo "this image has Hermes $got; this package is for $VERSION (use the image nousresearch/hermes-agent:v$VERSION)" >&2
+  exit 1
+}
+echo "Hermes Agent $got is in the image"

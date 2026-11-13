@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a1d2a9-2f3e-7543-95e7-151bf619bc97"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `scripted` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/bash -lc 'echo made by the agent > note.txt && cat note.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/bash -lc 'echo made by the agent > note.txt && cat note.txt'","aggregated_output":"made by the agent\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The command printed: Chunk ID: 764f6c\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 5\nOutput:\nmade by the agent"}}
+{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0}}

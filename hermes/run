@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""One turn of Hermes Agent (spec §8.4): start it headless, and say in Responses events what it does.
+
+`hermes chat --format stream-json` prints one JSON object per line: text piece by piece, what its tools do,
+and one last `result` line with the session's id and the turn's token counts.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+
+def environment():
+    """Hermes is given its key through the environment, not on the command line: it will not resume a session
+    with a different key on its command line, and the key it is given here is a new placeholder every turn."""
+    return {
+        **os.environ,
+        "HERMES_HOME": os.path.join(os.environ["HOME"], ".hermes"),     # the session's own: in its mind
+        "HERMES_WRITE_SAFE_ROOT": os.environ["HG_WORK"],                # where its file tools may write
+        "OPENAI_API_KEY": os.environ["HG_PROVIDER_KEY"],                # a placeholder: the platform's proxy
+        "OPENAI_BASE_URL": os.environ["HG_PROVIDER_URL"],               # puts the real key in on the way out
+    }
+
+
+def command(session):
+    args = ["hermes", "chat", "--yolo", "--provider", "custom", "--base-url", os.environ["HG_PROVIDER_URL"],
+            "-m", os.environ["HG_MODEL"], "--format", "stream-json"]
+    if session:
+        args += ["--resume", session]
+    return [*args, "--query-file", "-"]
+
+
+class Translator:
+    """Hermes's lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}                # tool call id -> (name, input), until its result comes
+        self.ended = False
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # its start-up chatter is not JSON
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "text":
+            self.emit.say(event.get("text", ""))
+        elif kind in ("thinking", "reasoning"):
+            self.emit.think(event.get("text", ""))
+        elif kind == "tool_use":
+            self.calls[event.get("tool_call_id")] = (event.get("name", ""), event.get("input") or {})
+        elif kind == "tool_result":
+            self.tool(event)
+        elif kind == "result":
+            self.end(event)
+
+    def tool(self, event):
+        name, given = self.calls.pop(event.get("tool_call_id"), (event.get("name", ""), {}))
+        output, failed = event.get("output", ""), bool(event.get("is_error"))
+        output = output if isinstance(output, str) else json.dumps(output)
+        if name == "terminal":
+            # Its terminal tool answers with JSON: what was printed, the exit code, and an error if there was one.
+            try:
+                result = json.loads(output)
+            except ValueError:
+                result = {}
+            result = result if isinstance(result, dict) else {}
+            code = result.get("exit_code")
+            self.emit.ran(str(given.get("command", "")), stdout=str(result.get("output", output)),
+                          stderr=str(result.get("error") or ""),
+                          exit_code=code if isinstance(code, int) else (1 if failed else 0))
+        elif name == "write_file" and not failed:
+            self.emit.wrote(str(given.get("path", "")))
+        elif name == "patch" and not failed:
+            self.emit.edited(str(given.get("path", "")))
+        elif name:
+            self.emit.used(name, json.dumps(given), output)
+
+    def end(self, event):
+        if event.get("session_id"):
+            self.state.set("session", event["session_id"])
+        counted = event.get("tokens") or {}
+        usage = {"input_tokens": counted.get("input", 0), "output_tokens": counted.get("output", 0),
+                 "input_tokens_details": {"cached_tokens": counted.get("cache_read", 0)}}
+        self.ended = True
+        if event.get("exit_code", 0) == 0:
+            self.emit.done(usage)
+        else:
+            said = event.get("error") or event.get("text") or f"Hermes ended with exit code {event.get('exit_code')}"
+            self.emit.failed("cli_error", str(said)[:2000], usage)
+
+
+def turn(request, emit, state, session):
+    cli = hgkit.Cli(command(session), env=environment(), stdin=request.brief())
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    hgkit.seed_mind()
+    session = state.get("session")
+    translator, code = turn(request, emit, state, session)
+    if session and not translator.ended and code != 0:
+        emit.log(f"Hermes could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code = turn(request, emit, state, None)
+    if not translator.ended:
+        emit.failed("cli_exit", f"Hermes exited with code {code} without a result.")
+
+
+if __name__ == "__main__":
+    main()

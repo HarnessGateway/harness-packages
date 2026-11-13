@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""One turn of pi (spec §8.4): start it headless, and say in Responses events what it does.
+
+`pi --mode json` prints one JSON object per line: the session, then each message as it grows (text and
+reasoning piece by piece), each tool as it starts and ends, and each turn's usage.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+PI = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "pi")
+PROVIDER = "harnessgateway"
+APIS = {"anthropic": "anthropic-messages", "openai-responses": "openai-responses", "openai-chat": "openai-completions"}
+DIFF_MAX = 100_000
+
+
+def configure():
+    """pi learns of a provider that is not built into it from a file in its own folder. The key written there
+    is a placeholder: the platform's proxy puts the real key in on the way out."""
+    folder = os.path.join(os.environ["HOME"], ".pi", "agent")
+    os.makedirs(folder, exist_ok=True)
+    model = os.environ["HG_MODEL"]
+    with open(os.path.join(folder, "models.json"), "w", encoding="utf-8") as file:
+        json.dump({"providers": {PROVIDER: {
+            "baseUrl": os.environ["HG_PROVIDER_URL"],
+            "api": APIS[os.environ["HG_PROVIDER_API"]],
+            "apiKey": os.environ["HG_PROVIDER_KEY"],
+            "models": [{"id": model, "name": model, "reasoning": True, "input": ["text"], "contextWindow": 200000,
+                        "maxTokens": 32000, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
+        }}}, file)
+
+
+def command(continuing):
+    args = [PI, "--provider", PROVIDER, "--model", os.environ["HG_MODEL"], "--mode", "json"]
+    if continuing:
+        args.append("--continue")
+    return [*args, "-p"]
+
+
+def text_of(result):
+    """A tool result's text: pi gives a list of content blocks."""
+    content = (result or {}).get("content") if isinstance(result, dict) else result
+    if isinstance(content, str):
+        return content
+    return "\n".join(block.get("text", "") for block in content or [] if isinstance(block, dict))
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in str(text).splitlines())[:DIFF_MAX]
+
+
+class Translator:
+    """pi's lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}                # tool call id -> its arguments, until it ends
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 0}}
+        self.error = None
+        self.settled = False
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "session" and event.get("id"):
+            self.state.set("session", event["id"])
+        elif kind == "message_update":
+            piece = event.get("assistantMessageEvent") or {}
+            if piece.get("type") == "text_delta":
+                self.emit.say(piece.get("delta", ""))
+            elif piece.get("type") == "thinking_delta":
+                self.emit.think(piece.get("delta", ""))
+        elif kind == "tool_execution_start":
+            self.calls[event.get("toolCallId")] = event.get("args") or {}
+        elif kind == "tool_execution_end":
+            self.tool(event)
+        elif kind == "turn_end":
+            message = event.get("message") or {}
+            counted = message.get("usage") or {}
+            cached = counted.get("cacheRead", 0)
+            self.usage["input_tokens"] += counted.get("input", 0) + cached + counted.get("cacheWrite", 0)
+            self.usage["output_tokens"] += counted.get("output", 0)
+            self.usage["input_tokens_details"]["cached_tokens"] += cached
+            if message.get("stopReason") == "error":
+                self.error = str(message.get("errorMessage") or "pi reported an error from the provider")
+        elif kind in ("agent_end", "agent_settled"):
+            self.settled = True
+
+    def tool(self, event):
+        name, given = event.get("toolName", ""), self.calls.pop(event.get("toolCallId"), {})
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        output, failed = text_of(event.get("result")), bool(event.get("isError"))
+        if name == "bash":
+            code = (result.get("structuredContent") or {}).get("exit_code")
+            self.emit.ran(given.get("command", ""), stdout=output,
+                          exit_code=code if isinstance(code, int) else (1 if failed else 0))
+        elif name == "write" and not failed:
+            self.emit.wrote(given.get("path", ""), lines_of(given.get("content", ""), "+"))
+        elif name == "edit" and not failed:
+            edits = given.get("edits") or [given]
+            diff = "".join(lines_of(edit.get("oldText", ""), "-") + lines_of(edit.get("newText", ""), "+")
+                           for edit in edits)
+            self.emit.edited(given.get("path", ""), diff[:DIFF_MAX])
+        elif name:
+            self.emit.used(name, json.dumps(given), output)
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    hgkit.seed_mind()
+    configure()
+    cli = hgkit.Cli(command(state.get("session") is not None), stdin=request.brief())
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        translator.read(line)
+    if translator.error:
+        emit.failed("provider_error", translator.error[:2000], translator.usage)
+    elif cli.exit_code == 0 and translator.settled:
+        emit.done(translator.usage)
+    else:
+        emit.failed("cli_exit", f"pi exited with code {cli.exit_code} without finishing.", translator.usage)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,14 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "sh_0001", "type": "shell_call", "call_id": "call_0001", "status": "completed", "action": {"commands": ["echo made by the agent > note.txt && cat note.txt"]}}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "sh_0001", "type": "shell_call", "call_id": "call_0001", "status": "completed", "action": {"commands": ["echo made by the agent > note.txt && cat note.txt"]}}}
+{"type": "response.output_item.added", "output_index": 1, "item": {"id": "sho_0001", "type": "shell_call_output", "call_id": "call_0001", "status": "completed", "output": [{"stdout": "made by the agent\n", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}]}}
+{"type": "response.output_item.done", "output_index": 1, "item": {"id": "sho_0001", "type": "shell_call_output", "call_id": "call_0001", "status": "completed", "output": [{"stdout": "made by the agent\n", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}]}}
+{"type": "response.output_item.added", "output_index": 2, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "delta": "The command ", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "delta": "printed: mad", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "delta": "e by the age", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "delta": "nt", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "text": "The command printed: made by the agent", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "part": {"type": "output_text", "text": "The command printed: made by the agent", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 2, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "The command printed: made by the agent", "annotations": []}]}}
+{"type": "hg.done", "usage": {"input_tokens": 200, "output_tokens": 40, "input_tokens_details": {"cached_tokens": 0}}}

@@ -1,0 +1,11 @@
+{"type": "system", "subtype": "init", "model": "scripted", "session_id": "", "timestamp": 1794537483791}
+{"type": "tool_use", "name": "terminal", "tool_call_id": "call_998bab54e8114ebbb86b85ac", "input": {"command": "echo made by the agent > note.txt && cat note.txt"}, "timestamp": 1794537506918}
+{"type": "tool_result", "name": "terminal", "tool_call_id": "call_998bab54e8114ebbb86b85ac", "output": "{\"output\": \"made by the agent\", \"exit_code\": 0, \"error\": null}", "duration_ms": 488, "is_error": false, "timestamp": 1794537507407}
+{"type": "text", "text": "\n\nThe command ", "timestamp": 1794537507471}
+{"type": "text", "text": "printed: {\"o", "timestamp": 1794537507480}
+{"type": "text", "text": "utput\": \"mad", "timestamp": 1794537507489}
+{"type": "text", "text": "e by the age", "timestamp": 1794537507500}
+{"type": "text", "text": "nt\", \"exit_c", "timestamp": 1794537507509}
+{"type": "text", "text": "ode\": 0, \"er", "timestamp": 1794537507520}
+{"type": "text", "text": "ror\": null}", "timestamp": 1794537507530}
+{"type": "result", "session_id": "local-9408257c7bc7586b6a2477d4a3576612f0fa292b15f41fb5175941bde5d4912a", "exit_code": 0, "text": "The command printed: {\"output\": \"made by the agent\", \"exit_code\": 0, \"error\": null}", "tokens": {"input": 200, "output": 40, "total": 240, "cache_read": 0, "cache_write": 0}, "duration_ms": 23857, "timestamp": 1794537507649}

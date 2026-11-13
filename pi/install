@@ -1,0 +1,17 @@
+#!/bin/sh
+# Installs pi at a pinned version under /harness/tools, by its makers' documented method (npm).
+set -eu
+VERSION=1.5.2
+
+for need in node npm python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: pi needs Node.js 22.19 or later, and this package's run needs python3" >&2
+    exit 1
+  }
+done
+
+npm install --prefix /harness/tools --no-audit --no-fund --loglevel=error "@earendil-works/pi-coding-agent@$VERSION"
+
+got=$(/harness/tools/node_modules/.bin/pi --version 2>/dev/null | tail -1 | awk '{print $NF}')
+[ "$got" = "$VERSION" ] || { echo "installed pi $got, wanted $VERSION" >&2; exit 1; }
+echo "pi $got installed"

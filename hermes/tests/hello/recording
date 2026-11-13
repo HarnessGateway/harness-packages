@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "model": "scripted", "session_id": "", "timestamp": 1794536622066}
+{"type": "text", "text": "[turn 1] You", "timestamp": 1794536633091}
+{"type": "text", "text": " said: Say h", "timestamp": 1794536633101}
+{"type": "text", "text": "ello.", "timestamp": 1794536633110}
+{"type": "result", "session_id": "local-22fad4f90d8b05043b1d5cd54b891dad5b76e2982619cef3f074f9e0c36a071f", "exit_code": 0, "text": "[turn 1] You said: Say hello.", "tokens": {"input": 100, "output": 20, "total": 120, "cache_read": 0, "cache_write": 0}, "duration_ms": 11177, "timestamp": 1794536633243}

@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "name": "pi",
+  "version": "1.5.2-1",
+  "description": "pi, unmodified.",
+  "mind": ".pi",
+  "apis": ["anthropic", "openai-responses", "openai-chat"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}

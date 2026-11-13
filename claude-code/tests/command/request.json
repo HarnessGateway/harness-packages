@@ -1,0 +1,1 @@
+{"model": "claude-code", "input": "RUN: echo made by the agent > note.txt && cat note.txt"}

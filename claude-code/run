@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""One turn of Claude Code (spec §8.4): start it headless, and say in Responses events what it does.
+
+Claude Code prints one JSON object per line (`--output-format stream-json`): the provider's own streaming
+events as they arrive, each finished assistant message, each tool result, and one last `result` line.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+CLAUDE = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "claude")
+DIFF_MAX = 100_000
+
+
+def environment():
+    """Claude Code is told its provider through these variables."""
+    env = dict(os.environ)
+    env.update({
+        "ANTHROPIC_BASE_URL": os.environ["HG_PROVIDER_URL"],
+        "ANTHROPIC_AUTH_TOKEN": os.environ["HG_PROVIDER_KEY"],          # a placeholder: the platform's proxy
+        "ANTHROPIC_MODEL": os.environ["HG_MODEL"],                      # puts the real key in on the way out
+        "ANTHROPIC_SMALL_FAST_MODEL": os.environ["HG_MODEL"],           # its background model must exist too
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_AUTOUPDATER": "1",
+    })
+    return env
+
+
+def command(request, session):
+    args = [CLAUDE, "--dangerously-skip-permissions", "-p", "--output-format", "stream-json", "--verbose",
+            "--include-partial-messages"]
+    if session:
+        args += ["--resume", session]
+    if request.instructions:
+        args += ["--append-system-prompt", request.instructions]
+    servers = {
+        server["server_label"]: {"type": "http", "url": server["server_url"], **(
+            {"headers": server["headers"]} if server.get("headers") else {})}
+        for server in request.mcp_servers if server.get("server_label") and server.get("server_url")
+    }
+    if servers:
+        args += ["--mcp-config", json.dumps({"mcpServers": servers})]
+    return args
+
+
+def text_of(content):
+    """A tool result's text: Claude Code gives a string, or a list of blocks."""
+    if isinstance(content, str):
+        return content
+    return "\n".join(block.get("text", "") for block in content or [] if isinstance(block, dict))
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+class Translator:
+    """Claude Code's lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}                # tool_use id -> (name, input): waiting for its result
+        self.streamed = False          # whether the message being read has arrived piece by piece
+        self.ended = False
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # not JSON: something it printed aside
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init" and event.get("session_id"):
+            self.state.set("session", event["session_id"])
+        elif kind == "stream_event" and not event.get("parent_tool_use_id"):
+            self.piece(event.get("event") or {})
+        elif kind == "assistant":
+            self.message(event.get("message") or {}, bool(event.get("parent_tool_use_id")))
+        elif kind == "user":
+            for block in (event.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    self.result(block)
+        elif kind == "result":
+            self.end(event)
+
+    def piece(self, event):
+        if event.get("type") == "message_start":
+            self.streamed = False
+        delta = event.get("delta") or {}
+        if delta.get("type") == "text_delta":
+            self.streamed = True
+            self.emit.say(delta.get("text", ""))
+        elif delta.get("type") == "thinking_delta":
+            self.streamed = True
+            self.emit.think(delta.get("thinking", ""))
+
+    def message(self, message, from_subagent):
+        for block in message.get("content") or []:
+            if block.get("type") == "tool_use":
+                self.calls[block.get("id")] = (block.get("name", ""), block.get("input") or {})
+            elif not self.streamed and not from_subagent:               # it did not arrive piece by piece
+                if block.get("type") == "text":
+                    self.emit.say(block.get("text", ""))
+                elif block.get("type") == "thinking":
+                    self.emit.think(block.get("thinking", ""))
+        self.streamed = False
+
+    def result(self, block):
+        name, given = self.calls.pop(block.get("tool_use_id"), ("", {}))
+        output, failed = text_of(block.get("content")), bool(block.get("is_error"))
+        if name == "Bash":
+            self.emit.ran(given.get("command", ""), stdout="" if failed else output, stderr=output if failed else "",
+                          exit_code=1 if failed else 0)
+        elif name == "Write" and not failed:
+            self.emit.wrote(given.get("file_path", ""), lines_of(given.get("content", ""), "+"))
+        elif name in ("Edit", "MultiEdit") and not failed:
+            edits = given.get("edits") or [given]
+            diff = "".join(lines_of(edit.get("old_string", ""), "-") + lines_of(edit.get("new_string", ""), "+")
+                           for edit in edits)
+            self.emit.edited(given.get("file_path", ""), diff[:DIFF_MAX])
+        elif name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            self.emit.called(server, tool, given, output=None if failed else output, error=output if failed else None)
+        elif name:
+            self.emit.used(name, json.dumps(given), output)
+
+    def end(self, event):
+        counted = event.get("usage") or {}
+        cached = counted.get("cache_read_input_tokens", 0)
+        usage = {
+            "input_tokens": counted.get("input_tokens", 0) + cached + counted.get("cache_creation_input_tokens", 0),
+            "output_tokens": counted.get("output_tokens", 0),
+            "input_tokens_details": {"cached_tokens": cached},
+        }
+        self.ended = True
+        if event.get("is_error") or event.get("subtype") != "success":
+            said = event.get("result") or f"Claude Code ended with {event.get('subtype')}"
+            self.emit.failed(str(event.get("subtype") or "cli_error"), str(said)[:2000], usage)
+        else:
+            self.emit.done(usage)
+
+
+def turn(request, emit, state, session):
+    """Run the CLI once. Returns its translator and its exit code."""
+    hgkit.seed_mind()
+    cli = hgkit.Cli(command(request, session), env=environment(), stdin=request.brief(instructions=False))
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    session = state.get("session")
+    translator, code = turn(request, emit, state, session)
+    if session and not translator.ended and not translator.calls and code != 0:
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): start a new one.
+        emit.log(f"Claude Code could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code = turn(request, emit, state, None)
+    if not translator.ended:
+        emit.failed("cli_exit", f"Claude Code exited with code {code} without a result.")
+
+
+if __name__ == "__main__":
+    main()

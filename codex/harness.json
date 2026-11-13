@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "name": "codex",
+  "version": "0.167.2-1",
+  "description": "Codex CLI, unmodified.",
+  "mind": ".codex",
+  "apis": ["openai-responses"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}
