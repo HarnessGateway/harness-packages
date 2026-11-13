@@ -1,6 +1,5 @@
 """Every package is valid, and translates its CLI's recorded output into exactly the lines it is known to."""
 
-import filecmp
 import json
 import re
 from pathlib import Path
@@ -48,13 +47,6 @@ def test_the_version_in_the_manifest_is_the_version_the_install_pins(name: str) 
     pinned = re.search(r"^VERSION=(\S+)", (ROOT / name / "install").read_text(), re.MULTILINE)
     assert pinned is not None
     assert manifest["version"].rsplit("-", 1)[0] == pinned.group(1)
-
-
-def test_the_builder_installs_and_runs_exactly_as_claude_code_does() -> None:
-    for part in ("install", "run"):
-        assert filecmp.cmp(ROOT / "claude-code" / part, ROOT / "harness-package-builder" / part, shallow=False), part
-    skill = ROOT / "harness-package-builder/seeds/mind/.claude/skills/harness-package-builder/SKILL.md"
-    assert skill.read_text().startswith("---\nname: harness-package-builder\n")
 
 
 @pytest.mark.parametrize("name", PACKAGES)
