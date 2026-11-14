@@ -65,9 +65,11 @@ harness is installed and working, remove `/work/.trial` and `/work/.scratch`.
 
 ## What you can reach
 
-You are in a sandbox too. In an environment whose network is `limited` you reach your provider and the common
-package registries (npm, PyPI, GitHub and the rest of the list in `packages.md`), which is enough to install
-and read about most CLIs. In one whose network is `open` you reach any public host.
+You are in a sandbox too. In an environment whose network is `limited` you reach your provider and the
+package managers (npm, PyPI, GitHub and the rest of the list in `packages.md`), which is enough to install
+and read about most CLIs. In one whose network is `open` you reach any public host. In one whose network is
+`closed` you reach your provider only: you cannot install a CLI or read about one there, so say so and ask
+for a limited or an open environment before anything else.
 
 A refused host answers `403` with a line saying why. When a host you need is refused, do not work around it
 and do not guess what it would have said. Say which host, and ask the person to continue this session in an

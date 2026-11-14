@@ -243,7 +243,7 @@ def test_the_variables_the_guide_lists_are_the_ones_a_turn_is_given() -> None:
 def test_the_hosts_the_guide_says_an_install_always_reaches_are_the_platform_s() -> None:
     text = (GUIDE / "packages.md").read_text()
     section = text[text.index("always reach"):]
-    listed = set(re.findall(r"`([a-z0-9.-]+\.[a-z]+)`", section[:section.index("\n\n")]))
+    listed = set(re.findall(r"`((?:\*\.)?[a-z0-9.-]+\.[a-z]+)`", section[:section.index("\n\nA turn reaches them")]))
     assert listed == {entry.host for entry in PACKAGE_MANAGER_HOSTS}
 
 

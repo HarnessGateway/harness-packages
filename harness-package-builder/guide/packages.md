@@ -88,16 +88,27 @@ It must:
 
 Write `$HG_HARNESS`, never the path it stands for: that is what lets an install be tried anywhere.
 
-An install can always reach the common package registries:
-`registry.npmjs.org`, `registry.yarnpkg.com`, `pypi.org`, `files.pythonhosted.org`, `github.com`,
-`codeload.github.com`, `objects.githubusercontent.com`, `raw.githubusercontent.com`,
-`release-assets.githubusercontent.com`, `crates.io`, `static.crates.io`, `index.crates.io`,
-`proxy.golang.org`, `sum.golang.org`, `rubygems.org`, `repo.maven.apache.org`, `repo1.maven.org`,
-`deb.debian.org`, `security.debian.org`, `archive.ubuntu.com`, `security.ubuntu.com`, `ports.ubuntu.com`,
-`dl-cdn.alpinelinux.org`, `astral.sh`, `nodejs.org`.
+An install can always reach the package managers, whatever its environment's network:
 
-A turn reaches them too when its environment has package managers turned on, which is the default. Do not
-count on it for something every turn needs: declare that host in `run.egress`.
+| Group | Hosts |
+|---|---|
+| Version control | `github.com`, `www.github.com`, `api.github.com`, `gist.github.com`, `codeload.github.com`, `npm.pkg.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `pkg-npm.githubusercontent.com`, `avatars.githubusercontent.com`, `camo.githubusercontent.com`, `gitlab.com`, `www.gitlab.com`, `registry.gitlab.com`, `bitbucket.org`, `www.bitbucket.org`, `api.bitbucket.org` |
+| Container registries | `registry-1.docker.io`, `auth.docker.io`, `index.docker.io`, `hub.docker.com`, `www.docker.com`, `production.cloudflare.docker.com`, `production.cloudfront.docker.com`, `download.docker.com`, `gcr.io`, `*.gcr.io`, `ghcr.io`, `mcr.microsoft.com`, `*.data.mcr.microsoft.com`, `public.ecr.aws` |
+| JavaScript | `registry.npmjs.org`, `www.npmjs.com`, `www.npmjs.org`, `npmjs.com`, `npmjs.org`, `yarnpkg.com`, `registry.yarnpkg.com`, `jsr.io`, `npm.jsr.io`, `nodejs.org`, `www.nodejs.org` |
+| Python | `pypi.org`, `www.pypi.org`, `files.pythonhosted.org`, `pythonhosted.org`, `test.pypi.org`, `pypi.python.org`, `pypa.io`, `www.pypa.io`, `astral.sh`, `repo.anaconda.com`, `conda.anaconda.org`, `anaconda.org`, `www.anaconda.com`, `anaconda.com`, `continuum.io` |
+| Ruby | `rubygems.org`, `www.rubygems.org`, `api.rubygems.org`, `index.rubygems.org`, `ruby-lang.org`, `www.ruby-lang.org`, `rubyforge.org`, `www.rubyforge.org`, `rubyonrails.org`, `www.rubyonrails.org`, `rvm.io`, `get.rvm.io` |
+| Rust | `crates.io`, `www.crates.io`, `index.crates.io`, `static.crates.io`, `rustup.rs`, `static.rust-lang.org`, `www.rust-lang.org` |
+| Go | `proxy.golang.org`, `sum.golang.org`, `index.golang.org`, `golang.org`, `www.golang.org`, `goproxy.io`, `pkg.go.dev` |
+| The JVM | `maven.org`, `repo.maven.org`, `central.maven.org`, `repo1.maven.org`, `repo.maven.apache.org`, `maven.google.com`, `jcenter.bintray.com`, `gradle.org`, `www.gradle.org`, `services.gradle.org`, `plugins.gradle.org`, `plugins-artifacts.gradle.org`, `kotlinlang.org`, `www.kotlinlang.org`, `spring.io`, `repo.spring.io` |
+| PHP, .NET, Dart, Elixir, Perl, CocoaPods, Haskell, Swift | `packagist.org`, `www.packagist.org`, `repo.packagist.org`, `nuget.org`, `www.nuget.org`, `api.nuget.org`, `pub.dev`, `api.pub.dev`, `hex.pm`, `www.hex.pm`, `cpan.org`, `www.cpan.org`, `metacpan.org`, `www.metacpan.org`, `api.metacpan.org`, `cocoapods.org`, `www.cocoapods.org`, `cdn.cocoapods.org`, `haskell.org`, `www.haskell.org`, `hackage.haskell.org`, `swift.org`, `www.swift.org` |
+| Linux distributions | `deb.debian.org`, `security.debian.org`, `ubuntu.com`, `*.ubuntu.com`, `ppa.launchpad.net`, `launchpad.net`, `www.launchpad.net`, `dl-cdn.alpinelinux.org`, `*.nixos.org` |
+| Development tools | `dl.k8s.io`, `pkgs.k8s.io`, `k8s.io`, `www.k8s.io`, `releases.hashicorp.com`, `apt.releases.hashicorp.com`, `rpm.releases.hashicorp.com`, `archive.releases.hashicorp.com`, `hashicorp.com`, `www.hashicorp.com`, `apache.org`, `www.apache.org`, `archive.apache.org`, `downloads.apache.org`, `eclipse.org`, `www.eclipse.org`, `download.eclipse.org`, `developer.apple.com`, `developer.android.com`, `pkg.stainless.com`, `binaries.prisma.sh` |
+| Mirrors, fonts, schemas, the Model Context Protocol | `sourceforge.net`, `*.sourceforge.net`, `packagecloud.io`, `*.packagecloud.io`, `fonts.googleapis.com`, `fonts.gstatic.com`, `json-schema.org`, `www.json-schema.org`, `json.schemastore.org`, `www.schemastore.org`, `*.modelcontextprotocol.io` |
+
+A turn reaches them too in an environment whose network is `limited` and allows package managers, which is
+the default. Do not count on it for something every turn needs: declare that host in `run.egress`. In an
+environment whose network is `closed` a turn reaches its provider and nothing else, not even what
+`run.egress` declares.
 
 **A CLI that cannot be installed this way.** Some CLIs keep their dependencies with the home they run under,
 or update themselves in place; one read-only install shared by every session does not suit them. When the
