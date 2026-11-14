@@ -12,7 +12,6 @@ import sys
 import threading
 from pathlib import Path
 
-import harnessgateway
 import pytest
 from harnessgateway import packaging
 from harnessgateway.domain.archive import read_archive
@@ -25,7 +24,6 @@ ROOT = Path(__file__).parents[1]
 BUILDER = ROOT / "harness-package-builder"
 GUIDE = BUILDER / "guide"
 TRIAL = GUIDE / "trial.py"
-SHELL = Path(harnessgateway.__file__).parents[1] / "packages" / "shell"       # the template, in the core
 DOCUMENTS = sorted(GUIDE.glob("*.md"))
 
 
@@ -48,16 +46,32 @@ def _trial(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> sub
                           text=True, timeout=120, check=False)
 
 
+RUN = """#!/usr/bin/env python3
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+import hgkit
+
+request, emit = hgkit.Request(), hgkit.Emitter()
+cli = hgkit.Cli(["sh", "-c", "exec 2>&1\\n" + request.prompt])          # the "agent" is the shell
+for line in cli.lines():
+    emit.say(line + "\\n")
+if cli.exit_code == 0:
+    emit.done()
+elif not cli.stopped:
+    emit.failed("command_failed", f"The command exited with code {cli.exit_code}.")
+"""
+
+
 @pytest.fixture
 def package(tmp_path: Path) -> Path:
-    """A package being written in the builder's work folder: the template, under a name of its own."""
+    """A package being written in the builder's work folder: the smallest one there can be."""
     folder = tmp_path / "builder-work" / "my-shell"
     folder.mkdir(parents=True)
-    for name in ("harness.json", "install", "run"):
-        (folder / name).write_bytes((SHELL / name).read_bytes())
-        (folder / name).chmod((SHELL / name).stat().st_mode)
-    manifest = json.loads((folder / "harness.json").read_text())
-    (folder / "harness.json").write_text(json.dumps({**manifest, "name": "my-shell"}))
+    (folder / "harness.json").write_text(json.dumps({"contract": 1, "name": "my-shell", "version": "1-1", "apis": []}))
+    (folder / "install").write_text("#!/bin/sh\necho nothing to install\n")
+    (folder / "run").write_text(RUN)
+    for name in ("install", "run"):
+        (folder / name).chmod(0o755)
     return folder
 
 

@@ -24,11 +24,8 @@ python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || {
   exit 1
 }
 python3 -m venv "$HG_HARNESS/tools/platform"
-platform() {
-  "$HG_HARNESS/tools/platform/bin/pip" install --quiet --disable-pip-version-check \
-    "https://github.com/HarnessGateway/harnessgateway/archive/refs/$1.tar.gz"
-}
-platform "tags/v$PLATFORM" || platform heads/v4         # until $PLATFORM is released, its code is the v4 branch
+"$HG_HARNESS/tools/platform/bin/pip" install --quiet --disable-pip-version-check \
+  "https://github.com/HarnessGateway/harnessgateway/archive/refs/tags/v$PLATFORM.tar.gz"
 
 got=$("$HG_HARNESS/tools/platform/bin/harnessgateway" version)
 [ "$got" = "$PLATFORM" ] || { echo "installed the platform's checker at $got, wanted $PLATFORM" >&2; exit 1; }
