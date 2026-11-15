@@ -88,6 +88,11 @@ It must:
 
 Write `$HG_HARNESS`, never the path it stands for: that is what lets an install be tried anywhere.
 
+**npm.** npm 12, which the platform's default image has, runs no package's install script unless told to;
+earlier npm runs every one. An install that is the same on both installs with `--ignore-scripts`, then runs by
+name the one script the CLI needs, if it has one (`npm view <package>@<version> scripts` shows it). Claude Code
+needs its own, which puts the native binary in place: see `claude-code/install`.
+
 An install can always reach the package managers, whatever its environment's network:
 
 | Group | Hosts |

@@ -1,7 +1,7 @@
 {
   "contract": 1,
   "name": "claude-code",
-  "version": "2.1.323-1",
+  "version": "2.1.323-2",
   "description": "Claude Code, unmodified.",
   "mind": ".claude",
   "apis": ["anthropic"],

@@ -1,7 +1,7 @@
 {
   "contract": 1,
   "name": "harness-package-builder",
-  "version": "2.1.323-1",
+  "version": "2.1.323-2",
   "description": "Claude Code set up to write harness packages: for another agent CLI, or a customised version of one that ships.",
   "mind": ".claude",
   "apis": ["anthropic"],
