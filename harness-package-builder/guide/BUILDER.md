@@ -9,10 +9,12 @@ The package you are running from is a complete, working one. Read it before you 
 
 ## The platform, in seven lines
 
-1. A caller sends an OpenAI Responses request to `POST /v1/responses`, naming a harness in `model`. The
-   platform runs one **turn** in a new sandbox and streams OpenAI Responses events back.
-2. **The platform knows no CLI.** It reads `harness.json`, runs `install` once and `run` once per turn, and
-   never looks inside either. Everything about a CLI is in its package.
+1. A caller sends an OpenAI Responses request to `POST /v1/responses`, naming an environment, a harness it
+   carries, a provider and a model in `model` (`environment/harness/provider/model`). The platform runs one
+   **turn** in a new sandbox and streams OpenAI Responses events back.
+2. **The platform knows no CLI.** It reads `harness.json`, runs `install` once on the image of each environment
+   that carries the harness and `run` once per turn, and never looks inside either. Everything about a CLI is
+   in its package.
 3. **A session is two folders:** `/mind` (which is `$HOME`) and `/work`. They are restored before a turn and
    saved after it. Nothing else survives: not `/tmp`, not a running process, not the sandbox.
 4. **`/harness` is the installed package**, read-only during a turn: the package's files, what `install` put
@@ -73,9 +75,9 @@ for a limited or an open environment before anything else.
 
 A refused host answers `403` with a line saying why. When a host you need is refused, do not work around it
 and do not guess what it would have said. Say which host, and ask the person to continue this session in an
-environment whose network is open: in the console's chat, the environment is chosen beside the harness; in
-the API it is the first part of `model` (`<environment>:harness-package-builder/…`). The session carries on
-with everything in `/work`.
+environment whose network is open and that carries this harness: in the console's chat, the environment is
+chosen first, then a harness it carries; in the API it is the first part of `model`
+(`<environment>/harness-package-builder/<provider>/<model>`). The session carries on with everything in `/work`.
 
 The network you have while building is yours. The harness you write gets only what its manifest declares.
 
@@ -173,6 +175,11 @@ not try here. Then tell the person how it becomes a harness:
   a draft where every file can be read and changed; **Install** makes it a harness; or
 - `POST /v1/drafts` with `{"name": "<name>", "session": "<this session's id>", "path": "<name>"}`, then
   `POST /v1/drafts/<name>/install`.
+
+Then an environment must carry it before a request can name it: in the console, tick it in the environment's
+Harnesses; or `PATCH /v1/environments/<environment>` with the whole list of `harnesses` it is to carry. It is
+installed on that environment's image, and a request names it as `<environment>/<name>/<provider>/<model>`
+(`<environment>/<name>/none/none` for a harness that calls no model).
 
 The session's id is in the variable `HG_SESSION`. The install's log, and every host a turn of the new harness
 was refused, show in the console; the person brings them back to you in this session.

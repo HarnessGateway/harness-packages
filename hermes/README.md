@@ -3,18 +3,17 @@
 Hermes Agent, unmodified, at version 0.23.1.
 
 - **Provider API:** OpenAI Chat Completions.
-- **Needs an environment built from Hermes's own image.** Hermes installs and updates itself, and keeps its
-  dependencies with the home it runs under: started with a fresh home it downloads them again, several
-  hundred megabytes into the session's mind. The one layout its makers ship in which a single read-only
-  install serves many homes is their image. So this package installs nothing and checks the image instead:
+- **Install:** a checkout of the release under `$HG_HARNESS/tools`, and Hermes's own package manager for its
+  Python environment, with Hermes's full feature set. What its terminal and web interfaces and its browser
+  tools use (its own Node.js, FFmpeg, a browser, the computer-use driver) is left out: a headless turn uses
+  none of it. It takes a few minutes, once for each environment image. The image
+  needs `git` and a `python3` of the minor Hermes's package manager pins (3.14 for this version); the
+  platform's sandbox image has both.
 
-  ```
-  POST /v1/environments  {"name": "hermes", "image": "nousresearch/hermes-agent:v0.23.1"}
-  model: "hermes:hermes/<provider>/<model>"
-  ```
-
-  A session can still move between Hermes and the other harnesses: the next request names another
-  environment in its model, and the mind and the work go with it.
+  Hermes keeps its dependency state with the home that installed it, and every session's home is a new one:
+  started the usual way, it would build its dependencies again into each session's mind. So `run` starts it on
+  the environment the install built, by its path, which Hermes uses as it is whatever the home. That is the
+  layout of Hermes's own image: one read-only install, any number of homes.
 - **Session:** kept by Hermes in `~/.hermes`; its id is kept in the package's state and resumed with
   `--resume`.
 - **Output:** text word by word; its `terminal` tool as shell calls; `write_file` and `patch` as file
@@ -24,4 +23,4 @@ Hermes Agent, unmodified, at version 0.23.1.
 
 What this package handles for you: Hermes will not resume a session with a different key on its command
 line, so the key is given through the environment; its file tools are told they may write in the work
-folder; its image's service stack is not started, only the agent.
+folder; no gateway or service of Hermes's is started, only the agent, for one turn.

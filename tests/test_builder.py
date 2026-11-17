@@ -98,7 +98,9 @@ def test_a_tried_turn_prints_what_the_platform_accepts_and_is_kept_as_a_case(tmp
     assert reader.terminal is not None
     assert reader.terminal.kind == "done"
     assert (stand_in / "work" / "note.txt").read_text() == "made here\n"
-    assert json.loads((package / "tests" / "hello" / "request.json").read_text())["input"].startswith("echo made")
+    kept = json.loads((package / "tests" / "hello" / "request.json").read_text())
+    assert kept["input"].startswith("echo made")
+    assert kept["model"] == "default/my-shell/none/none"       # every part named; it calls no model
     assert (package / "tests" / "hello" / "recording").read_text() == "made here\n"
     assert [result.name for result in packaging.check(package)] == ["hello"]           # the case replays
 

@@ -1,1 +1,1 @@
-{"model": "pi", "input": "RUN: echo made by the agent > note.txt && cat note.txt"}
+{"model": "default/pi/scripted/scripted", "input": "RUN: echo made by the agent > note.txt && cat note.txt"}

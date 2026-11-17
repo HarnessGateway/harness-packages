@@ -47,7 +47,8 @@ The provider is rarely the CLI's maker. Turn off anything that assumes it is: si
 model list fetched from the maker, telemetry. A turn that hangs on a host it cannot reach is almost always
 one of these; the trial's host list shows which.
 
-A harness that needs no model has `"apis": []`, and these variables are empty.
+A harness that needs no model has `"apis": []`, and these variables are empty. A request names it with
+`none` for its provider and its model: `<environment>/<name>/none/none`.
 
 ## What a CLI cannot honour
 

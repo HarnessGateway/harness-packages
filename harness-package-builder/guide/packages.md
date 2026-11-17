@@ -63,13 +63,15 @@ letter, and are not `HOME` or any name the platform sets (nothing beginning `HG_
 A host entry is `host`, `*.suffix`, or either with `:port`. Without a port it covers 80 and 443. A bare `*` is
 refused, and there is no entry that denies.
 
-There is no field for a default model, a time limit, an image, or MCP servers. The organization sets a
-harness's default provider and model after installing it; the turn's time limit and image belong to the
-environment; an MCP server is the package's own business (see `tailoring.md`).
+There is no field for a provider, a model, a time limit, an image, or MCP servers. A request names its
+provider and model in full (`environment/harness/provider/model`); the turn's time limit and image belong to
+the environment, which also chooses the harnesses it carries; an MCP server is the package's own business (see
+`tailoring.md`).
 
 ## `install`
 
-Runs once for each environment image, in a container of that image, as user 10000, with the root read-only.
+Runs once on the image of each environment that carries the harness (after the environment's setup script,
+when it has one), in a container of that image, as user 10000, with the root read-only.
 
 | | |
 |---|---|
@@ -118,8 +120,9 @@ environment whose network is `closed` a turn reaches its provider and nothing el
 **A CLI that cannot be installed this way.** Some CLIs keep their dependencies with the home they run under,
 or update themselves in place; one read-only install shared by every session does not suit them. When the
 CLI's makers publish an image, use it: `install` installs nothing, checks that the CLI is on the `PATH` at
-the pinned version, and when it is not, says which image to make an environment from and how the model is
-then named (`<environment>:<harness>/…`). The README says the same. An image's own entry point is never run:
+the pinned version, and when it is not, says which image to make an environment from, that the environment
+must carry the harness (`"harnesses": ["<harness>"]`), and how the model is then named
+(`<environment>/<harness>/<provider>/<model>`). The README says the same. An image's own entry point is never run:
 `run` starts the CLI itself.
 
 ## `run`

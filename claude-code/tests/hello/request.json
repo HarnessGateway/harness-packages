@@ -1,1 +1,1 @@
-{"model": "claude-code", "input": "Say hello."}
+{"model": "default/claude-code/scripted/scripted", "input": "Say hello."}

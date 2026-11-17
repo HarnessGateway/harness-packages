@@ -13,13 +13,18 @@ sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
 
 import hgkit  # noqa: E402 - the kit is found through the path set above
 
+TOOLS = os.path.join(os.environ["HG_HARNESS"], "tools")
+HERMES = os.path.join(TOOLS, "bin", "hermes")           # what `install` wrote: Hermes on the install's own environment
+
 
 def environment():
     """Hermes is given its key through the environment, not on the command line: it will not resume a session
     with a different key on its command line, and the key it is given here is a new placeholder every turn."""
     return {
         **os.environ,
+        "PATH": os.path.join(TOOLS, "bin") + os.pathsep + os.environ.get("PATH", ""),   # for when it starts itself
         "HERMES_HOME": os.path.join(os.environ["HOME"], ".hermes"),     # the session's own: in its mind
+        "HERMES_RUNTIME_DIR": os.path.join(TOOLS, "hermes", "tools"),   # its tools are the install's, read-only
         "HERMES_WRITE_SAFE_ROOT": os.environ["HG_WORK"],                # where its file tools may write
         "OPENAI_API_KEY": os.environ["HG_PROVIDER_KEY"],                # a placeholder: the platform's proxy
         "OPENAI_BASE_URL": os.environ["HG_PROVIDER_URL"],               # puts the real key in on the way out
@@ -27,7 +32,7 @@ def environment():
 
 
 def command(session):
-    args = ["hermes", "chat", "--yolo", "--provider", "custom", "--base-url", os.environ["HG_PROVIDER_URL"],
+    args = [HERMES, "chat", "--yolo", "--provider", "custom", "--base-url", os.environ["HG_PROVIDER_URL"],
             "-m", os.environ["HG_MODEL"], "--format", "stream-json"]
     if session:
         args += ["--resume", session]

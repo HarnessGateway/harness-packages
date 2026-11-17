@@ -1,1 +1,1 @@
-{"model": "hermes", "input": "RUN: echo made by the agent > note.txt && cat note.txt"}
+{"model": "hermes/hermes/scripted/scripted", "input": "RUN: echo made by the agent > note.txt && cat note.txt"}

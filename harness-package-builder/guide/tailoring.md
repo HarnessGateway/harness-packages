@@ -49,11 +49,12 @@ turn and that it is put back at the next.
 | Credentials | `secrets` in the manifest, each bound to hosts | The platform's proxy: placeholders inside, real values only toward those hosts |
 | Which hosts at all | `run.egress`, and the hosts of its secrets | The proxy, outside the sandbox |
 | What the operator sets | `settings`: variables in the turn | `run` passes them to the CLI |
-| Provider and model | Set on the installed harness by the organization, or named in the request | The platform |
-| Time, CPU, memory, disk, image | The environment the request names | The platform |
+| Provider and model | Named in the request (`environment/harness/provider/model`) | The platform |
+| Time, CPU, memory, disk, image | The environment the request names, which must carry the harness | The platform |
 
 The last two are not the package's. When the purpose needs a longer turn or another image, the README says
-which environment to create and how the model is then named (`<environment>:<name>/…`).
+which environment to create (carrying the harness) and how the model is then named
+(`<environment>/<name>/<provider>/<model>`).
 
 The outer layers (the proxy, the placeholders, the sandbox) hold whatever the agent does. The inner ones
 (the CLI's own rules) make it this agent and not a general one; they can never widen what the outer ones

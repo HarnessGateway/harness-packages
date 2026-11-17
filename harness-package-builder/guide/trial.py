@@ -243,17 +243,7 @@ class Trial:
         shutil.rmtree(self.turn, ignore_errors=True)
         for folder in (self.mind, self.work, self.turn / "files"):
             folder.mkdir(parents=True, exist_ok=True)
-        if args.request:
-            request = json.loads(Path(args.request).read_text())
-        else:
-            request = {"model": self.name, "input": args.prompt}
-            if args.instructions:
-                request["instructions"] = args.instructions
-        (self.turn / "request.json").write_text(json.dumps(request, indent=2) + "\n")
-        (self.turn / "history.json").write_text("[]\n")
-        (self.turn / "handover.txt").write_text(args.handover)
         recording, printed = self.turn / "recording", self.turn / "printed.jsonl"
-
         needs_provider = bool(self.manifest.get("apis"))
         settings = {name: str(setting["default"]) for name, setting in (self.manifest.get("settings") or {}).items()
                     if isinstance(setting, dict) and setting.get("default") is not None}
@@ -266,6 +256,16 @@ class Trial:
             "HG_SESSION": "sess_trial", "HG_RESPONSE": "resp_trial", "HG_HANDOVER": args.handover,
             **settings, **given, "HGKIT_RECORD": str(recording),
         }
+
+        if args.request:
+            request = json.loads(Path(args.request).read_text())
+        else:
+            request = {"model": self._model(env), "input": args.prompt}
+            if args.instructions:
+                request["instructions"] = args.instructions
+        (self.turn / "request.json").write_text(json.dumps(request, indent=2) + "\n")
+        (self.turn / "history.json").write_text("[]\n")
+        (self.turn / "handover.txt").write_text(args.handover)
         api = env["HG_PROVIDER_API"]
         if needs_provider and api not in self.manifest["apis"]:
             print(f"note: this session's provider is reached by the {api or 'no'} API, and the package lists "
@@ -288,6 +288,12 @@ class Trial:
                     kept.append(name)
             print(f"kept as {case}/ ({', '.join(kept)})")
         return 0 if ok else 1
+
+    def _model(self, env):
+        """The request's model string, environment/harness/provider/model, for what the turn is given: this
+        session's environment, provider and model, or none/none for a package that calls no model."""
+        provider, model = (env["HG_PROVIDER"], env["HG_MODEL"]) if self.manifest.get("apis") else ("", "")
+        return "/".join((env["HG_ENVIRONMENT"] or "default", self.name, provider or "none", model or "none"))
 
     @staticmethod
     def _read(printed, recording, placeholder):

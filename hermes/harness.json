@@ -1,9 +1,10 @@
 {
   "contract": 1,
   "name": "hermes",
-  "version": "0.23.1-1",
-  "description": "Hermes Agent, unmodified. It runs in an environment built from Hermes's own image.",
+  "version": "0.23.1-2",
+  "description": "Hermes Agent, unmodified.",
   "mind": ".hermes",
   "apis": ["openai-chat"],
+  "install": { "timeout_s": 1800 },
   "run": { "stop_grace_s": 20 }
 }

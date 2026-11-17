@@ -1,24 +1,76 @@
 #!/bin/sh
-# Hermes Agent installs and updates itself, and keeps its dependencies with the home it is run under. The one
-# layout its makers ship in which a single read-only install serves many homes is their own image. So this
-# package installs nothing: it needs an environment whose image is Hermes's image, and checks that it is.
+# Installs Hermes Agent at a pinned version under $HG_HARNESS/tools, the way its makers' installer does: a checkout
+# of the release, and Hermes's own package manager (PM) for its Python environment.
+#
+# Hermes keeps its dependency state with the data root that installed it, and a session's home is a new data
+# root. So `run` does not start Hermes through that state: it starts it on the environment PM built here, by its
+# path. An interpreter that carries its own packages is used as it is, whatever the home: the layout of Hermes's
+# own image, where one read-only install serves every home. The last step here proves it, under a new home.
 set -eu
 VERSION=0.23.1
+ROOT="$HG_HARNESS/tools/hermes"            # the data root this install belongs to: PM's tools and its environment
+SOURCE="$ROOT/hermes-agent"                # the checkout, where Hermes's installer puts it under a data root
+COMMAND="$HG_HARNESS/tools/bin/hermes"
 
-command -v hermes >/dev/null 2>&1 || {
-  cat >&2 <<MESSAGE
-This environment's image has no hermes program.
-Hermes runs in an environment built from its makers' image. Create one, and name it in the model:
+for need in git python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: Hermes is installed from its repository, by its own package manager" >&2
+    exit 1
+  }
+done
 
-  POST /v1/environments  {"name": "hermes", "image": "nousresearch/hermes-agent:v$VERSION"}
-  model: "hermes:hermes/<provider>/<model>"
-MESSAGE
-  exit 1
-}
+git clone --quiet --depth 1 --branch "v$VERSION" https://github.com/NousResearch/hermes-agent.git "$SOURCE"
 
-got=$(hermes --version 2>/dev/null | head -1 | sed -E 's/.* v([0-9.]+).*/\1/')
-[ "$got" = "$VERSION" ] || {
-  echo "this image has Hermes $got; this package is for $VERSION (use the image nousresearch/hermes-agent:v$VERSION)" >&2
-  exit 1
-}
-echo "Hermes Agent $got is in the image"
+# PM starts on a Python of the minor its lock pins, as the installer's bootstrap does; it brings its own after that.
+python3 - "$SOURCE/pm/lock.json" <<'CHECK'
+import json
+import sys
+
+wanted = json.load(open(sys.argv[1], encoding="utf-8"))["packages"]["python"]["version"].split("+")[0]
+minor = tuple(int(part) for part in wanted.split(".")[:2])
+if sys.version_info[:2] != minor:
+    sys.exit("this image's python3 is %d.%d; Hermes %s's package manager starts on Python %d.%d "
+             "(the platform's sandbox image has it)" % (*sys.version_info[:2], wanted, *minor))
+CHECK
+
+export HERMES_HOME="$ROOT" HERMES_RUNTIME_DIR="$ROOT/tools" UV_NO_CONFIG=1
+# The Python environment with Hermes's full feature set, and the tools that takes (uv, PM's Python). The rest
+# of PM's default set (its own Node.js, FFmpeg, a browser, the computer-use driver) is what its terminal and
+# web interfaces and its browser tools use: a headless turn uses none of it, and PM's Node.js needs a system
+# library (libatomic) that an image may not have.
+(cd "$SOURCE" && python3 -m pm.cli install uv python --extra all)
+
+# The environment PM committed for this install, as its record names it.
+environment=$(python3 - "$ROOT" <<'FIND'
+import glob
+import json
+import os
+import sys
+
+for record in glob.glob(os.path.join(sys.argv[1], "installs", "*", "facts.json")):
+    found = json.load(open(record, encoding="utf-8")).get("packages", {}).get("venv", {}).get("environment")
+    if found and os.access(os.path.join(found, "bin", "python"), os.X_OK):
+        print(found)
+        break
+else:
+    sys.exit("Hermes's package manager recorded no Python environment under " + sys.argv[1])
+FIND
+)
+
+mkdir -p "$(dirname "$COMMAND")"
+cat > "$COMMAND" <<LAUNCHER
+#!/bin/sh
+# Hermes, on the environment its package manager built for this install, whatever home it is started under.
+exec "$environment/bin/python" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = "hermes"; from hermes_cli.main import main; sys.exit(main())' "$SOURCE" "\$@"
+LAUNCHER
+chmod 755 "$COMMAND"
+rm -rf "$ROOT/cache"                       # downloads, not the install
+
+# As a turn starts it: under a home that is not this install's. It must answer without building anything there.
+check="${TMPDIR:-/tmp}/hermes-check-$$"
+got=$(HERMES_HOME="$check" "$COMMAND" --version 2>&1) || { echo "$got" >&2; exit 1; }
+rm -rf "$check"
+case "$got" in
+  *"$VERSION"*) echo "Hermes Agent $VERSION installed" ;;
+  *) printf 'installed Hermes does not say it is version %s:\n%s\n' "$VERSION" "$got" >&2; exit 1 ;;
+esac

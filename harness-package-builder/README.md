@@ -15,12 +15,15 @@ Add it from the catalog, pick it in the chat, and ask:
 It writes the package into a folder of the session's work, tries it there, and says when it is ready. Then,
 in the console: **Sessions**, that session, **New harness from workspace**. The folder opens as a draft where
 every file can be read and changed, and **Install** makes it a harness. Over the API:
-`POST /v1/drafts {"name", "session", "path"}`, then `POST /v1/drafts/<name>/install`.
+`POST /v1/drafts {"name", "session", "path"}`, then `POST /v1/drafts/<name>/install`. A request can name the
+new harness once an environment carries it: tick it in the environment's Harnesses, or
+`PATCH /v1/environments/<environment>` with the `harnesses` it is to carry.
 
 In the default environment it reaches its provider and the common package registries, which is enough for
 most CLIs. For one whose installer or documentation is elsewhere, give it an environment whose network is
-`open` and name that environment in the model (`<environment>:harness-package-builder/…`). It says so itself
-when a host it needs is refused.
+`open` and that carries `harness-package-builder`, and name that environment in the model
+(`<environment>/harness-package-builder/<provider>/<model>`). It says so itself when a host it needs is
+refused.
 
 ## What is in it
 
