@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""One turn of Kilo Code's CLI: `kilo run --format json`, and its JSON lines said as Responses events.
+
+Kilo prints one JSON object per line: a step start, the text and reasoning parts of a message, each tool call
+with its finished state, a step finish with that request's token counts, and an error when the turn fails.
+Its session is resumed with `-s <id>`; the id is on every line, and is saved the moment it first appears.
+"""
+
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+KILO = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "kilo")
+DIFF_MAX = 100_000
+
+# What Kilo is told about the provider: a custom provider entry, speaking the API this turn was given.
+PROVIDERS = {
+    "anthropic": "@ai-sdk/anthropic",
+    "openai-chat": "@ai-sdk/openai-compatible",
+}
+
+# The model's declared limits. The CLI uses them to size its requests; a provider with a smaller window may
+# refuse a turn that runs past it, which the README says. The organization may set both on the harness.
+CONTEXT_TOKENS = 200_000
+OUTPUT_TOKENS = 32_000
+
+
+def limit(name, fallback):
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
+
+
+def environment():
+    """Kilo is told its provider through the config written for this turn; the environment keeps it quiet."""
+    env = dict(os.environ)
+    home = env["HOME"]
+    env.update({
+        "KILO_TELEMETRY_LEVEL": "off",
+        "KILO_DISABLE_MODELS_FETCH": "1",
+        "KILO_DISABLE_AUTOUPDATE": "1",
+        "KILO_DISABLE_SESSION_INGEST": "1",
+        "KILO_DISABLE_PRESENCE": "1",
+        # The session must stay under $HOME, which is the mind: pin the XDG folders there explicitly.
+        "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+        "XDG_DATA_HOME": os.path.join(home, ".local", "share"),
+        "XDG_STATE_HOME": os.path.join(home, ".local", "state"),
+        "XDG_CACHE_HOME": os.path.join(home, ".cache"),
+    })
+    return env
+
+
+def provider_api():
+    api = os.environ.get("HG_PROVIDER_API", "")
+    if api not in PROVIDERS:
+        raise RuntimeError(f"this turn's provider offers the {api or 'no'} API, and this harness speaks "
+                           f"{' and '.join(PROVIDERS)}")
+    return api
+
+
+def base_url(api):
+    url = os.environ["HG_PROVIDER_URL"].rstrip("/")
+    return url + "/v1" if api == "anthropic" else url
+
+
+def configuration(request):
+    """The global config Kilo reads: this turn's provider, model, and the request's MCP servers."""
+    api = provider_api()
+    model = os.environ["HG_MODEL"]
+    asked = request.body.get("max_output_tokens")
+    output = asked if isinstance(asked, int) and not isinstance(asked, bool) and asked > 0 \
+        else limit("MODEL_OUTPUT_TOKENS", OUTPUT_TOKENS)
+    config = {
+        "$schema": "https://app.kilo.ai/config.json",
+        "model": f"hg/{model}",
+        "small_model": f"hg/{model}",
+        "provider": {
+            "hg": {
+                "npm": PROVIDERS[api],
+                "name": "HarnessGateway provider",
+                # The key is the platform's placeholder; the config holds the name of the variable, never a value.
+                "options": {"baseURL": base_url(api), "apiKey": "{env:HG_PROVIDER_KEY}"},
+                "models": {
+                    model: {
+                        "name": model,
+                        "tool_call": True,
+                        "reasoning": True,
+                        "limit": {"context": limit("MODEL_CONTEXT_TOKENS", CONTEXT_TOKENS), "output": output},
+                    },
+                },
+            },
+        },
+        "enabled_providers": ["hg"],
+        "autoupdate": False,
+        "share": "disabled",
+        "experimental": {"openTelemetry": False},
+    }
+    servers = {
+        server["server_label"]: {
+            "type": "remote",
+            "url": server["server_url"],
+            **({"headers": server["headers"]} if server.get("headers") else {}),
+        }
+        for server in request.mcp_servers
+        if server.get("server_label") and server.get("server_url")
+    }
+    if servers:
+        config["mcp"] = servers
+    return config, sorted(servers)
+
+
+def write_configuration(config):
+    """Write the config where Kilo reads a global one. Its values are rewritten every turn."""
+    folder = os.path.join(os.environ["HOME"], ".config", "kilo")
+    os.makedirs(folder, exist_ok=True)
+    text = json.dumps(config, indent=2) + "\n"
+    for name in ("kilo.json", "kilo.jsonc"):
+        path = os.path.join(folder, name)
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as file:
+            file.write(text)
+        os.replace(temporary, path)
+
+
+def command(request, session, files):
+    args = [KILO, "run", "--format", "json", "--auto", "--pure", "--thinking",
+            "-m", f"hg/{os.environ['HG_MODEL']}"]
+    if session:
+        args += ["-s", session]
+    if request.effort:
+        # Kilo's own reasoning control: the variant the model declares. A model without variants ignores it.
+        args += ["--variant", request.effort]
+    for path in files:
+        args += ["-f", path]
+    args += ["--", request.brief()]
+    return args
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def diff_of(state):
+    metadata = state.get("metadata") or {}
+    filediff = metadata.get("filediff") or {}
+    return (filediff.get("patch") or metadata.get("diff") or "")[:DIFF_MAX]
+
+
+def code_of(name):
+    """A CLI error's name as the short lower-case code a failed turn carries."""
+    snake = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", str(name or ""))
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", snake).lower()
+    return re.sub(r"[^a-z0-9_]", "_", snake).strip("_") or "cli_error"
+
+
+class Translator:
+    """Kilo's JSON lines in, Responses events out."""
+
+    def __init__(self, emit, state, servers):
+        self.emit = emit
+        self.state = state
+        self.servers = servers            # the MCP servers this turn was given, by label
+        self.session = state.get("session")
+        self.started = False
+        self.ended = False
+        self.errors = []                  # (error name, message): the turn failed, once it is over
+        self.reason = None                # the last step's reason: stop, tool-calls, length, …
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cached_tokens = 0
+
+    @property
+    def usage(self):
+        return {"input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+                "input_tokens_details": {"cached_tokens": self.cached_tokens}}
+
+    def read(self, line):
+        if self.ended or not line.strip():
+            return
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # not JSON: something it printed aside
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        session = event.get("sessionID")
+        if session and session != self.session:
+            self.session = session
+            self.state.set("session", session)                          # the moment it reports it, not at the end
+        kind = event.get("type")
+        part = event.get("part") or {}
+        if kind == "text":
+            self.started = True
+            self.emit.say(str(part.get("text") or ""))
+        elif kind == "reasoning":
+            self.started = True
+            self.emit.think(str(part.get("text") or part.get("reasoning") or ""))
+        elif kind == "tool_use":
+            self.started = True
+            self.tool(part)
+        elif kind == "step_start":
+            self.started = True
+        elif kind == "step_finish":
+            self.started = True
+            self.finish(part)
+        elif kind == "error":
+            self.started = True
+            error = event.get("error") or {}
+            data = error.get("data") or {}
+            message = str(data.get("message") or error.get("message")
+                          or "Kilo reported an error without a message")
+            self.errors.append((str(error.get("name") or "cli_error"), message))
+        else:
+            self.started = True
+            self.emit.log(line)                                         # a line of another kind: not guessed at
+
+    def tool(self, part):
+        name = str(part.get("tool") or "")
+        state = part.get("state") or {}
+        status = str(state.get("status") or "")
+        if not name:
+            return self.emit.log(json.dumps(part))
+        if status not in ("completed", "error"):
+            return                                                      # still running: its finished line will come
+        given = state.get("input") if isinstance(state.get("input"), dict) else {}
+        output = state.get("output")
+        output = "" if output is None else str(output)
+        failed = status == "error"
+        error = str(state.get("error") or "") if failed else ""
+        metadata = state.get("metadata") or {}
+
+        if name == "bash":
+            given_exit = metadata.get("exit")
+            exit_code = int(given_exit) if isinstance(given_exit, (int, float)) else (1 if failed else 0)
+            self.emit.ran(str(given.get("command") or ""),
+                          stdout="" if failed else output,
+                          stderr=error if failed else "",
+                          exit_code=exit_code)
+        elif name == "write" and not failed:
+            path = str(given.get("filePath") or metadata.get("filepath") or "")
+            diff = diff_of(state) or lines_of(str(given.get("content") or ""), "+")
+            self.emit.wrote(path, diff)
+        elif name == "edit" and not failed:
+            path = str(given.get("filePath") or metadata.get("filepath") or "")
+            diff = diff_of(state) or (lines_of(str(given.get("oldString") or ""), "-")
+                                       + lines_of(str(given.get("newString") or ""), "+"))
+            self.emit.edited(path, diff)
+        elif name in ("write", "edit", "patch", "apply_patch") and not failed:
+            path = str(given.get("filePath") or metadata.get("filepath") or "")
+            self.emit.edited(path, diff_of(state))
+        else:
+            for server in sorted(self.servers, key=len, reverse=True):
+                if name.startswith(server + "_"):
+                    self.emit.called(server, name[len(server) + 1:], given,
+                                     output=None if failed else output, error=error if failed else None)
+                    return
+            self.emit.used(name, json.dumps(given), error if failed else output)
+
+    def finish(self, part):
+        tokens = part.get("tokens") or {}
+        cache = tokens.get("cache") or {}
+
+        def number(value):
+            return int(value) if isinstance(value, (int, float)) else 0
+
+        cached = number(cache.get("read"))
+        self.input_tokens += number(tokens.get("input")) + cached + number(cache.get("write"))
+        self.output_tokens += number(tokens.get("output")) + number(tokens.get("reasoning"))
+        self.cached_tokens += cached
+        self.reason = str(part.get("reason") or self.reason or "")
+
+    def end(self):
+        """Print the one terminal line, as the CLI left the turn."""
+        if self.ended:
+            return
+        self.ended = True
+        usage = self.usage
+        if self.errors:
+            name, message = self.errors[-1]
+            self.emit.failed(code_of(name), message[:2000], usage)
+        elif self.reason in ("length", "max_tokens"):
+            self.emit.incomplete("max_output_tokens", usage)
+        elif self.reason in ("content-filter", "content_filter"):
+            self.emit.incomplete("content_filter", usage)
+        elif self.started:
+            self.emit.done(usage)
+        else:
+            self.emit.failed("cli_exit", "Kilo printed no events for this turn; see the turn's log.")
+
+
+def turn(request, emit, state, session):
+    """Run the CLI once. Returns its translator and its exit code."""
+    hgkit.seed()
+    config, servers = configuration(request)
+    write_configuration(config)
+    files = request.place_files()
+    cli = hgkit.Cli(command(request, session, files), env=environment())
+    translator = Translator(emit, state, servers)
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli.exit_code
+
+
+def attempt(request, emit, state, session):
+    """One try, with what can fail before the CLI starts said as a failed turn. None when it did."""
+    try:
+        return turn(request, emit, state, session)
+    except ValueError as error:
+        emit.failed("input_error", str(error)[:2000])
+    except OSError as error:
+        emit.failed("cli_missing", f"Kilo could not be started: {error}. Its install may have failed, or its "
+                                   "configuration could not be written; see the environment's install log.")
+    return None
+
+
+def note_unmapped(request, emit):
+    """The request fields Kilo has no per-request option for, said once in the turn's log."""
+    if request.effort:
+        emit.log(f"Kilo passes reasoning effort {request.effort!r} to the model as --variant, but this harness "
+                 "declares no model variants, so the provider may ignore it")
+    text = request.body.get("text")
+    if isinstance(text, dict) and text.get("format"):
+        emit.log("Kilo cannot enforce text.format; the answer is returned as the model writes it")
+    for server in request.mcp_servers:
+        if server.get("allowed_tools"):
+            emit.log(f"Kilo does not filter an MCP server's tools per request; allowed_tools for "
+                     f"{server.get('server_label')!r} is ignored")
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    try:
+        provider_api()
+    except RuntimeError as error:
+        emit.failed("unsupported_provider", str(error))
+        return
+    note_unmapped(request, emit)
+    session = state.get("session")
+    result = attempt(request, emit, state, session)
+    if result is None:
+        return
+    translator, code = result
+    if session and not translator.started and not translator.ended and code != 0:
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): start a new one.
+        emit.log(f"Kilo could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        result = attempt(request, emit, state, None)
+        if result is None:
+            return
+        translator, code = result
+    if translator.ended:
+        return
+    if translator.errors:
+        translator.end()
+    elif code != 0:
+        translator.ended = True
+        emit.failed("cli_exit", f"Kilo exited with code {code} during this turn. "
+                                "The turn's log has what it printed on standard error.", translator.usage)
+    else:
+        translator.end()
+
+
+if __name__ == "__main__":
+    main()

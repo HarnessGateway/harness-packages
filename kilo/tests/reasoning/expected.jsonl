@@ -1,0 +1,13 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "rs_0001", "type": "reasoning", "summary": []}}
+{"type": "response.reasoning_summary_part.added", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "part": {"type": "summary_text", "text": ""}}
+{"type": "response.reasoning_summary_text.delta", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "delta": "The classic riddle: \"all but 9 run away\" means 9 remain."}
+{"type": "response.reasoning_summary_text.done", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "text": "The classic riddle: \"all but 9 run away\" means 9 remain."}
+{"type": "response.reasoning_summary_part.done", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "part": {"type": "summary_text", "text": "The classic riddle: \"all but 9 run away\" means 9 remain."}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "rs_0001", "type": "reasoning", "summary": [{"type": "summary_text", "text": "The classic riddle: \"all but 9 run away\" means 9 remain."}]}}
+{"type": "response.output_item.added", "output_index": 1, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0002", "output_index": 1, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 1, "content_index": 0, "delta": "9", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0002", "output_index": 1, "content_index": 0, "text": "9", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0002", "output_index": 1, "content_index": 0, "part": {"type": "output_text", "text": "9", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 1, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "9", "annotations": []}]}}
+{"type": "hg.done", "usage": {"input_tokens": 15591, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 15488}}}

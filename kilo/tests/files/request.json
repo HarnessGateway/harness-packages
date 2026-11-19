@@ -1,0 +1,19 @@
+{
+  "model": "builder/kilo/deepseek/deepseek-flash",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What is the secret word in the attached file? Answer with just the word."
+        },
+        {
+          "type": "input_file",
+          "filename": "note.txt",
+          "file_data": "VGhlIHNlY3JldCB3b3JkIGlzIE9SQU5HRS00Mi4K"
+        }
+      ]
+    }
+  ]
+}

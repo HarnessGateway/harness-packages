@@ -1,0 +1,4 @@
+{
+  "model": "builder/omp/deepseek/deepseek-flash",
+  "input": "Say hello."
+}

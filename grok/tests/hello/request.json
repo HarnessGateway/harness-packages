@@ -1,0 +1,4 @@
+{
+  "model": "builder/grok/deepseek/deepseek-flash",
+  "input": "Say hello."
+}

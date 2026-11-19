@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "minimax",
+  "version": "0.7.7-1",
+  "description": "MiniMax Code, unmodified.",
+  "mind": ".minimax",
+  "cache": [".minimax/cache", ".minimax/.builtin-skills"],
+  "apis": ["anthropic", "openai-responses", "openai-chat", "gemini"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}

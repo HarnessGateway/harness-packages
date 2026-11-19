@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "kimi",
+  "version": "2.6.3-1",
+  "description": "Kimi Code CLI, unmodified.",
+  "mind": ".kimi-code",
+  "cache": [".kimi-code/cache", ".kimi-code/logs", ".kimi-code/bin"],
+  "apis": ["anthropic", "openai-chat", "openai-responses"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}

@@ -1,0 +1,4 @@
+{
+  "model": "builder/aider/deepseek/deepseek-flash",
+  "input": "Write hello.py that prints hello, then run it with python."
+}

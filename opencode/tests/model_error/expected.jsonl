@@ -1,0 +1,1 @@
+{"type": "hg.failed", "code": "provider_error", "message": "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 65e62e10-f6e7-4567-b4e5-65acc4a6bcef)"}

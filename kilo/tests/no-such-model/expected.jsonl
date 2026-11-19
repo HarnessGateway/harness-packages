@@ -1,0 +1,1 @@
+{"type": "hg.failed", "code": "api_error", "message": "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 7d0e4f1c-45d7-4455-9fed-dc69efe606f9)", "usage": {"input_tokens": 0, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 0}}}

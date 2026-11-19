@@ -1,0 +1,7 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "Hello! \ud83e\udd90 Good to hear from you \u2014 what can I help you with today?", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "text": "Hello! \ud83e\udd90 Good to hear from you \u2014 what can I help you with today?", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "Hello! \ud83e\udd90 Good to hear from you \u2014 what can I help you with today?", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Hello! \ud83e\udd90 Good to hear from you \u2014 what can I help you with today?", "annotations": []}]}}
+{"type": "hg.done", "usage": {"input_tokens": 11194, "output_tokens": 20, "input_tokens_details": {"cached_tokens": 10880}}}

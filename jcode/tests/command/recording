@@ -1,0 +1,119 @@
+{"model":"deepseek-flash","provider":"Claude","session_id":"session_hare_1795005703317_243e75bb244f305c","type":"start"}
+{"connection":"https/sse","type":"connection_type"}
+{"phase":"sending request","type":"connection_phase"}
+{"phase":"waiting for response","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"text":"I","type":"text_delta"}
+{"text":"'ll","type":"text_delta"}
+{"text":" create","type":"text_delta"}
+{"text":" the","type":"text_delta"}
+{"text":" file","type":"text_delta"}
+{"text":" and","type":"text_delta"}
+{"text":" run","type":"text_delta"}
+{"text":" it","type":"text_delta"}
+{"text":".","type":"text_delta"}
+{"id":"call_00_ET_3jupvOC3GtIlpoGjnCf38002","name":"write","type":"tool_start"}
+{"delta":"{\"","type":"tool_input"}
+{"delta":"file","type":"tool_input"}
+{"delta":"_path","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":": \"","type":"tool_input"}
+{"delta":"/","type":"tool_input"}
+{"delta":"work","type":"tool_input"}
+{"delta":"/.","type":"tool_input"}
+{"delta":"t","type":"tool_input"}
+{"delta":"rial","type":"tool_input"}
+{"delta":"/j","type":"tool_input"}
+{"delta":"code","type":"tool_input"}
+{"delta":"/work","type":"tool_input"}
+{"delta":"/","type":"tool_input"}
+{"delta":"hello","type":"tool_input"}
+{"delta":".py","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":", \"","type":"tool_input"}
+{"delta":"content","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":": \"","type":"tool_input"}
+{"delta":"print","type":"tool_input"}
+{"delta":"(\\\"","type":"tool_input"}
+{"delta":"hello","type":"tool_input"}
+{"delta":"\\\")\\n","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":", \"","type":"tool_input"}
+{"delta":"int","type":"tool_input"}
+{"delta":"ent","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":": \"","type":"tool_input"}
+{"delta":"Create","type":"tool_input"}
+{"delta":" hello","type":"tool_input"}
+{"delta":".py","type":"tool_input"}
+{"delta":" that","type":"tool_input"}
+{"delta":" prints","type":"tool_input"}
+{"delta":" hello","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":"}","type":"tool_input"}
+{"id":"call_00_ET_3jupvOC3GtIlpoGjnCf38002","name":"write","type":"tool_exec"}
+{"stop_reason":"tool_use","type":"message_end"}
+{"cache_creation_input":0,"cache_read_input":9216,"input":311,"output":97,"type":"tokens"}
+{"cache_creation_input":0,"cache_read_input":9216,"input":311,"output":97,"type":"tokens"}
+{"error":null,"id":"call_00_ET_3jupvOC3GtIlpoGjnCf38002","name":"write","output":"Created /work/.trial/jcode/work/hello.py (1 lines):\n1+ print(\"hello\")\n\nFile diff:\n```diff\n--- /dev/null\n+++ b//work/.trial/jcode/work/hello.py\n@@ -0,0 +1 @@\n+print(\"hello\")\n```\n","type":"tool_done"}
+{"connection":"https/sse","type":"connection_type"}
+{"phase":"sending request","type":"connection_phase"}
+{"phase":"waiting for response","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"id":"call_00_ET_JpGYxgD0UAEAEleN1ag72398","name":"bash","type":"tool_start"}
+{"delta":"{\"","type":"tool_input"}
+{"delta":"command","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":": \"","type":"tool_input"}
+{"delta":"python","type":"tool_input"}
+{"delta":"3","type":"tool_input"}
+{"delta":" hello","type":"tool_input"}
+{"delta":".py","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":", \"","type":"tool_input"}
+{"delta":"int","type":"tool_input"}
+{"delta":"ent","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":": \"","type":"tool_input"}
+{"delta":"Run","type":"tool_input"}
+{"delta":" hello","type":"tool_input"}
+{"delta":".py","type":"tool_input"}
+{"delta":"\"","type":"tool_input"}
+{"delta":"}","type":"tool_input"}
+{"id":"call_00_ET_JpGYxgD0UAEAEleN1ag72398","name":"bash","type":"tool_exec"}
+{"stop_reason":"tool_use","type":"message_end"}
+{"cache_creation_input":0,"cache_read_input":9472,"input":269,"output":59,"type":"tokens"}
+{"cache_creation_input":0,"cache_read_input":9472,"input":269,"output":59,"type":"tokens"}
+{"error":null,"id":"call_00_ET_JpGYxgD0UAEAEleN1ag72398","name":"bash","output":"hello\n\n--- Command finished with exit code: 0 ---\n","type":"tool_done"}
+{"connection":"https/sse","type":"connection_type"}
+{"phase":"sending request","type":"connection_phase"}
+{"phase":"waiting for response","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"text":"Done","type":"text_delta"}
+{"text":".","type":"text_delta"}
+{"text":" `","type":"text_delta"}
+{"text":"hello","type":"text_delta"}
+{"text":".py","type":"text_delta"}
+{"text":"`","type":"text_delta"}
+{"text":" contains","type":"text_delta"}
+{"text":" `","type":"text_delta"}
+{"text":"print","type":"text_delta"}
+{"text":"(\"","type":"text_delta"}
+{"text":"hello","type":"text_delta"}
+{"text":"\")","type":"text_delta"}
+{"text":"`","type":"text_delta"}
+{"text":" and","type":"text_delta"}
+{"text":" running","type":"text_delta"}
+{"text":" it","type":"text_delta"}
+{"text":" outputs","type":"text_delta"}
+{"text":" `","type":"text_delta"}
+{"text":"hello","type":"text_delta"}
+{"text":"`.","type":"text_delta"}
+{"stop_reason":"end_turn","type":"message_end"}
+{"cache_creation_input":0,"cache_read_input":9728,"input":139,"output":21,"type":"tokens"}
+{"cache_creation_input":0,"cache_read_input":9728,"input":139,"output":21,"type":"tokens"}
+{"connection_phase":"streaming","connection_type":"https/sse","model":"deepseek-flash","provider":"Claude","reported_service_tier":null,"requested_service_tier":null,"served_service_tier":null,"service_tier_report_status":"not_reported","session_id":"session_hare_1795005703317_243e75bb244f305c","status_detail":null,"text":"I'll create the file and run it.Done. `hello.py` contains `print(\"hello\")` and running it outputs `hello`.","type":"done","upstream_provider":null,"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":9728,"input_tokens":139,"output_tokens":21}}

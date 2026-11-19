@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""One turn of nanobot.
+
+nanobot's command line has no headless, machine-readable mode: `nanobot agent -m` renders an answer and
+progress hints for a person. The makers' documented Python SDK runs the same agent runtime and emits typed
+events (text, reasoning, tool calls with results, usage). `nanobot_headless.py`, beside this file, drives
+one turn through that SDK and prints one JSON object per line; this `run` translates those lines into the
+platform's Responses events. The process is started by `hgkit.Cli`, which records its output for tests,
+replays the recording under `harnessgateway package check`, and stops it (and everything it started) when
+the turn is stopped.
+"""
+
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+HARNESS = os.environ["HG_HARNESS"]
+PYTHON = os.path.join(HARNESS, "tools", "venv", "bin", "python")
+DRIVER = os.path.join(HARNESS, "nanobot_headless.py")
+OUTPUT_MAX = 200_000
+DIFF_MAX = 100_000
+EXIT_CODE = re.compile(r"(?:^|\n)Exit code: (-?\d+)\b")
+
+
+def usage_of(counted):
+    """nanobot's SDK usage, in the Responses shape. Its input_tokens already include cache reads and writes."""
+    if not isinstance(counted, dict):
+        return None
+    return {
+        "input_tokens": int(counted.get("input_tokens") or 0),
+        "output_tokens": int(counted.get("output_tokens") or 0),
+        "input_tokens_details": {"cached_tokens": int(counted.get("cached_tokens") or 0)},
+    }
+
+
+def shell_result(output, ok):
+    """A command's formatted result: what it printed, and the exit code nanobot recorded in it."""
+    last = None
+    for last in EXIT_CODE.finditer(output):
+        pass
+    if last is not None:
+        stdout = output[:last.start()]
+        exit_code = int(last.group(1))
+    else:
+        stdout = output
+        exit_code = 0 if ok else 1
+    return stdout.rstrip("\n") + ("\n" if stdout.strip() else ""), exit_code
+
+
+class Translator:
+    """The driver's JSON lines in, Responses events out."""
+
+    def __init__(self, emit, mcp_labels):
+        self.emit = emit
+        self.labels = sorted({str(label) for label in mcp_labels if label}, key=len, reverse=True)
+        self.session = None
+        self.ended = False
+        self.items = 0                     # text, reasoning and tool items this turn
+        self.error = None
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError
+        except ValueError:
+            return self.emit.log(line[:OUTPUT_MAX])          # not ours: something the runtime printed aside
+        kind = event.get("event")
+        if kind == "session":
+            self.session = event.get("session")
+        elif kind == "text":
+            self.items += 1
+            self.emit.say(str(event.get("text") or ""))
+        elif kind == "reasoning":
+            self.items += 1
+            self.emit.think(str(event.get("text") or ""))
+        elif kind == "tool" and event.get("phase") == "end":
+            self.items += 1
+            self.tool(event)
+        elif kind == "done":
+            self.end(event)
+        elif kind == "error":
+            self.error = event                 # main decides whether to retry or to tell the caller
+
+    def message(self, event):
+        said = str(event.get("message") or "").strip()
+        return said[:2000] or "nanobot ended without saying what went wrong."
+
+    def tool(self, event):
+        name = str(event.get("name") or "")
+        given = event.get("arguments") or {}
+        ok = bool(event.get("ok"))
+        result = str(event.get("result") or "")
+        error = str(event.get("error") or "")
+        files = event.get("files") or []
+
+        if ok and files:
+            for change in files:
+                path = str(change.get("path") or "")
+                diff = str(change.get("diff") or "")[:DIFF_MAX]
+                action = change.get("action")
+                if action == "create":
+                    self.emit.wrote(path, diff)
+                elif action == "delete":
+                    self.emit.deleted(path)
+                else:
+                    self.emit.edited(path, diff)
+            return
+
+        if name == "exec":
+            command = str(given.get("command") or given.get("cmd") or "")
+            stdout, exit_code = shell_result(result if ok else error, ok)
+            self.emit.ran(command, stdout=stdout, stderr="", exit_code=exit_code)
+            return
+
+        server, tool = self.mcp_name(name)
+        if server is not None:
+            self.emit.called(server, tool, given, output=result if ok else None,
+                             error=None if ok else error)
+            return
+
+        self.emit.used(name or "tool", json.dumps(given, ensure_ascii=False),
+                       output=(result if ok else error)[:OUTPUT_MAX])
+
+    def mcp_name(self, name):
+        for label in self.labels:
+            forms = ("mcp_" + label + "_", "mcp_" + re.sub(r"[^A-Za-z0-9_-]", "_", label) + "_")
+            for prefix in forms:
+                if name.startswith(prefix) and len(name) > len(prefix):
+                    return label, name[len(prefix):]
+        return None, None
+
+    def end(self, event):
+        counted = usage_of(event.get("usage"))
+        reason = str(event.get("stop_reason") or "completed")
+        if reason == "max_iterations":
+            self.emit.failed("max_iterations",
+                             "nanobot reached its tool-iteration limit (200) before finishing the turn.", counted)
+        elif reason == "cancelled":
+            self.emit.failed("cancelled", "nanobot's turn was cancelled before it finished.", counted)
+        elif reason == "error":
+            said = str(event.get("error") or "").strip()
+            self.emit.failed("cli_error", said[:2000] or "nanobot ended with an error.", counted)
+        elif reason == "empty_final_response" and not str(event.get("content") or "").strip():
+            self.emit.failed("empty_response", "nanobot finished without an answer.", counted)
+        else:
+            self.emit.done(counted)
+        self.ended = True
+
+
+def spec_of(request):
+    """The turn, as the driver's standard input."""
+    body = request.body
+    return {
+        "prompt": request.brief(instructions=True),       # nanobot has no system-prompt option
+        "effort": request.effort,
+        "max_output_tokens": body.get("max_output_tokens"),
+        "temperature": body.get("temperature"),
+        "mcp_servers": [
+            {"label": server.get("server_label"), "url": server.get("server_url"),
+             "headers": server.get("headers"), "allowed_tools": server.get("allowed_tools")}
+            for server in request.mcp_servers
+            if server.get("server_label") and server.get("server_url")
+        ],
+    }
+
+
+def environment():
+    env = dict(os.environ)
+    env.setdefault("TIKTOKEN_CACHE_DIR", os.path.join(env["HOME"], ".nanobot", "cache", "tiktoken"))
+    return env
+
+
+def _session_problem(event):
+    said = str(event.get("message") or "").lower()
+    return any(word in said for word in ("session", "database", "sqlite", "locked", "corrupt", "no such table"))
+
+
+def _store_problem(event):
+    said = str(event.get("message") or "").lower()
+    return any(word in said for word in ("database", "sqlite", "corrupt", "no such table", "not a db"))
+
+
+def _move_store_aside():
+    """Keep an unreadable session store as *.broken so nanobot can start a new one beside it."""
+    root = os.path.join(os.environ["HOME"], ".nanobot", "sessions")
+    for folder in os.listdir(root) if os.path.isdir(root) else []:
+        for name in ("sessions.sqlite3", "sessions.sqlite3-wal", "sessions.sqlite3-shm"):
+            path = os.path.join(root, folder, name)
+            if os.path.exists(path):
+                try:
+                    os.replace(path, path + ".broken")
+                except OSError:
+                    pass
+
+
+def turn(request, emit, state, session):
+    """Run the driver once. Returns its translator and exit code."""
+    spec = spec_of(request)
+    spec["session_key"] = session or ""
+    cli = hgkit.Cli([PYTHON, "-I", DRIVER], env=environment(), stdin=json.dumps(spec))
+    translator = Translator(emit, [server.get("server_label") for server in request.mcp_servers])
+    saved = False
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+            if translator.session and not saved:
+                state.set("session", translator.session)     # the moment the CLI reports it
+                saved = True
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    try:
+        _turn(request, emit, state)
+    except Exception as exc:                                  # never leave the caller without an ending
+        try:
+            emit.failed("harness_error", f"the harness could not run nanobot: {exc}"[:2000])
+        except RuntimeError:
+            pass                                              # it had already ended; nothing to add
+
+
+def _turn(request, emit, state):
+    hgkit.seed()
+    if not os.path.exists(PYTHON) and not os.environ.get("HG_REPLAY"):
+        emit.failed("not_installed",
+                    "nanobot is not installed in this environment: run the harness's install for this "
+                    "environment, then try again.")
+        return
+
+    body = request.body
+    notes = []
+    if isinstance(body.get("text"), dict) and body["text"].get("format"):
+        notes.append("the request's `text.format` is not supported by nanobot")
+    if body.get("top_p") is not None:
+        notes.append("the request's `top_p` is not supported by nanobot")
+    if body.get("max_tool_calls") is not None:
+        notes.append("the request's `max_tool_calls` is not supported by nanobot")
+    for note in notes:
+        emit.log(note)
+
+    session = state.get("session") or "cli:direct"     # nanobot's own one-shot session
+    translator, code = turn(request, emit, state, session)
+    if translator.error is not None and session and not translator.items and _session_problem(translator.error):
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): a new session.
+        emit.log("nanobot could not continue the saved session; starting a new one")
+        state.clear("session")
+        if _store_problem(translator.error):
+            _move_store_aside()
+        translator, code = turn(request, emit, state, None)
+    if translator.error is not None:
+        emit.failed("nanobot_error", translator.message(translator.error))
+    elif not translator.ended:
+        emit.failed("cli_exit", f"nanobot exited with code {code} without finishing the turn.")
+
+
+if __name__ == "__main__":
+    main()

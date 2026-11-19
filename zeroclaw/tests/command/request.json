@@ -1,0 +1,4 @@
+{
+  "model": "builder/zeroclaw/deepseek/deepseek-flash",
+  "input": "Write hello.py that prints hello, then run it."
+}

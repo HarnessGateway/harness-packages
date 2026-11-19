@@ -1,0 +1,6 @@
+{"event": "session", "session": "cli:direct"}
+{"event": "tool", "phase": "start", "id": "call_00_ET_yY0Erhqet444Ls2DoRRk2981", "name": "read_file", "arguments": {"path": "inputs/notes.txt"}}
+{"event": "tool", "phase": "end", "id": "call_00_ET_yY0Erhqet444Ls2DoRRk2981", "name": "read_file", "arguments": {"path": "inputs/notes.txt"}, "ok": true, "result": "1| project codename: nightingale\n2| secret word: plover\n\n(End of file — 2 lines total)", "error": null, "files": []}
+{"event": "text", "text": "pl"}
+{"event": "text", "text": "over"}
+{"event": "done", "content": "plover", "stop_reason": "completed", "error": null, "usage": {"input_tokens": 11323, "output_tokens": 44, "cached_tokens": 10880}}

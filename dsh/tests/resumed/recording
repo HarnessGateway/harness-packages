@@ -1,0 +1,8 @@
+{"type":"session","sessionId":"session-6dd0b32b-e902-4129-862a-cce44cc47d3e","cwd":"/work/.trial/dsh/work"}
+{"type":"status","phase":"turn_start","turn":2}
+{"type":"status","phase":"step_start","turn":2,"step":1}
+{"type":"thinking","text":""}
+{"type":"text","text":"The program printed:\n\n```\nhello\n```"}
+{"type":"status","phase":"step_end","turn":2,"step":1,"usage":{"inputTokens":229,"outputTokens":9,"cacheReadTokens":5888,"cacheWriteTokens":0,"totalTokens":6126}}
+{"type":"status","phase":"turn_end","turn":2,"reason":{"kind":"completed"}}
+{"type":"final","sessionId":"session-6dd0b32b-e902-4129-862a-cce44cc47d3e","reason":{"kind":"completed"},"text":"The program printed:\n\n```\nhello\n```"}

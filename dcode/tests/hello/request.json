@@ -1,0 +1,4 @@
+{
+  "model": "builder/dcode/deepseek/deepseek-flash",
+  "input": "Say hello."
+}

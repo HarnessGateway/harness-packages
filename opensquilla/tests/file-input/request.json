@@ -1,0 +1,19 @@
+{
+  "model": "builder/opensquilla/deepseek/deepseek-flash",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What is the project codename in the attached file? One word."
+        },
+        {
+          "type": "input_file",
+          "filename": "notes.txt",
+          "file_data": "UHJvamVjdCBjb2RlbmFtZTogQmx1ZWJpcmQuCkRlYWRsaW5lOiBGcmlkYXkuCg=="
+        }
+      ]
+    }
+  ]
+}

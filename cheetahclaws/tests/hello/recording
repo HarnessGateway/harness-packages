@@ -1,0 +1,7 @@
+{"type": "session_start", "seq": 1, "ts": 1795002999.151, "session_id": "d168ec49", "model": "anthropic/deepseek-flash", "cwd": "/work/.trial/cheetahclaws/work", "permission_mode": "accept-all", "mode": "headless", "resumed": false, "version": "3.5.90", "max_turns": null, "skipped_untrusted": []}
+{"type": "user_message", "seq": 2, "ts": 1795002999.16, "session_id": "d168ec49", "text": "Say hello."}
+{"type": "assistant_delta", "seq": 3, "ts": 1795003001.365, "session_id": "d168ec49", "text": "Hello"}
+{"type": "assistant_delta", "seq": 4, "ts": 1795003001.366, "session_id": "d168ec49", "text": "!"}
+{"type": "assistant_message", "seq": 5, "ts": 1795003001.368, "session_id": "d168ec49", "text": "Hello!", "tool_calls": [], "model": "anthropic/deepseek-flash"}
+{"type": "usage", "seq": 6, "ts": 1795003001.368, "session_id": "d168ec49", "input_tokens": 7879, "output_tokens": 3, "cache_read_tokens": 1536, "cache_write_tokens": 0, "model": "anthropic/deepseek-flash"}
+{"type": "result", "seq": 7, "ts": 1795003001.368, "session_id": "d168ec49", "final_text": "Hello!", "exit_reason": "completed", "is_error": false, "exit_code": 0, "turns": 1, "usage": {"input_tokens": 7879, "output_tokens": 3, "cache_read_tokens": 1536, "cache_write_tokens": 0}, "cost_usd": 0.0, "duration_ms": 2225, "model": "anthropic/deepseek-flash", "permission_denials": [], "skipped_untrusted": []}

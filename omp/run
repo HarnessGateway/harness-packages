@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""One turn of Oh My Pi (omp): start it headless, and say in Responses events what it does.
+
+omp prints one JSON object per line with `-p --mode json`: a session header (which carries the id a later
+turn resumes), streaming assistant deltas, each tool's start and end, each finished message with its token
+usage, and one `agent_end` when the run is over.
+"""
+
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+BUN = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "bun")
+CLI = os.path.join(os.environ["HG_HARNESS"], "tools", "omp", "install", "global", "node_modules",
+                   "@oh-my-pi", "pi-coding-agent", "dist", "cli.js")
+DIFF_MAX = 100_000
+PROVIDER = "hg"                       # the name this package puts on the request's provider in models.yml
+API_NAMES = {
+    "anthropic": "anthropic-messages",
+    "openai-chat": "openai-completions",
+    "openai-responses": "openai-responses",
+    "gemini": "google-generative-ai",
+}
+THINKING = {"none": "off", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
+            "xhigh": "xhigh", "max": "max"}
+
+
+def write_configuration(request):
+    """Tell omp the turn's provider and model, in the files it reads from its agent directory."""
+    agent = os.path.join(os.environ["HOME"], ".omp", "agent")
+    os.makedirs(agent, exist_ok=True)
+    api = API_NAMES.get(os.environ.get("HG_PROVIDER_API", ""), "anthropic-messages")
+    base = os.environ.get("HG_PROVIDER_URL", "").rstrip("/")
+    if api == "google-generative-ai" and not base.endswith("/v1beta"):
+        base += "/v1beta"                                   # the Gemini API's base URL form
+    model = os.environ.get("HG_MODEL", "")
+    lines = [
+        "providers:",
+        f"  {PROVIDER}:",
+        f"    baseUrl: {json.dumps(base)}",
+        "    apiKey: HG_PROVIDER_KEY",                      # a placeholder: the platform's proxy
+        f"    api: {api}",                                    # puts the real key in on the way out
+        "    auth: apiKey",
+        "    models:",
+        f"      - id: {json.dumps(model)}",
+        f"        name: {json.dumps(model)}",
+        "        contextWindow: 200000",
+        "        maxTokens: 8192",
+    ]
+    with open(os.path.join(agent, "models.yml"), "w", encoding="utf-8") as file:
+        file.write("\n".join(lines) + "\n")
+    # Use the bundled model catalogue: an online refresh would reach a dozen hosts of providers this turn has
+    # no business with. Telemetry has no endpoint here and is turned off explicitly.
+    with open(os.path.join(agent, "config.yml"), "w", encoding="utf-8") as file:
+        file.write("models:\n  offline: true\ntelemetry:\n  otlpExportEnabled: false\n")
+
+    servers = {}
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not label or not url:
+            continue
+        entry = {"type": "http", "url": url}
+        if server.get("headers"):
+            entry["headers"] = server["headers"]
+        servers[label] = entry
+    path = os.path.join(agent, "mcp.json")
+    if servers:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump({"mcpServers": servers}, file)
+    elif os.path.exists(path):
+        os.unlink(path)                                     # the previous turn's servers must not linger
+
+
+def environment():
+    env = dict(os.environ)
+    env.update({
+        "PI_NO_TITLE": "1",                                 # no extra model call for a session title
+        "NO_COLOR": "1",
+    })
+    return env
+
+
+def command(request, session):
+    args = [BUN, CLI, "-p", "--mode", "json", "--no-title", "--offline", "--approval-mode", "yolo",
+            "--model", f"{PROVIDER}/{os.environ.get('HG_MODEL', '')}"]
+    effort = request.effort
+    if effort in THINKING:
+        args += ["--thinking", THINKING[effort]]
+    if session:
+        args += ["--resume", session]
+    if request.instructions:
+        args += ["--append-system-prompt", request.instructions]
+    return args
+
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    return "\n".join(block.get("text", "") for block in content or []
+                     if isinstance(block, dict) and block.get("type") == "text")
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in str(text).splitlines())[:DIFF_MAX]
+
+
+def message_text(event):
+    """A provider error's message, made plain: `400 {"type":"error",...}` becomes what the provider said."""
+    raw = str(event.get("errorMessage") or event.get("error") or "the provider failed")
+    raw = raw.split("\nraw-http-request=")[0].strip()
+    status = event.get("errorStatus")
+    match = re.match(r"\s*\d{3}\s+", raw)
+    if match:
+        try:
+            inner, _ = json.JSONDecoder().raw_decode(raw[match.end():])
+            said = (inner.get("error") or {}).get("message") if isinstance(inner, dict) else None
+            if said:
+                raw = str(said)
+        except ValueError:
+            pass
+    return f"The provider answered {status}: {raw}" if status else raw
+
+
+class Translator:
+    """omp's JSON lines in, Responses events out."""
+
+    def __init__(self, emit, state, request):
+        self.emit = emit
+        self.state = state
+        self.labels = [server.get("server_label") for server in request.mcp_servers
+                       if server.get("server_label")]
+        self.args = {}                 # tool call id -> its arguments
+        self.streamed_text = set()     # response ids whose text arrived piece by piece
+        self.streamed_think = set()    # the same for reasoning
+        self.current = None            # the assistant response being read
+        self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        self.counted = set()           # response ids already counted
+        self.error = None
+        self.ended = False
+
+    def usage_of(self, message):
+        use = message.get("usage") or {}
+        key = (message.get("responseId"), message.get("timestamp"))
+        if key in self.counted:
+            return
+        self.counted.add(key)
+        for name in self.usage:
+            self.usage[name] += int(use.get(name) or 0)
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # not JSON: something it printed aside
+        kind = event.get("type")
+        if kind == "session" and event.get("id"):
+            self.state.set("session", event["id"])                      # saved the moment it is known
+        elif kind == "message_start":
+            message = event.get("message") or {}
+            if message.get("role") == "assistant" and message.get("responseId"):
+                self.current = message["responseId"]
+                self.streamed_text.discard(self.current)
+                self.streamed_think.discard(self.current)
+        elif kind == "message_update":
+            self.piece(event.get("assistantMessageEvent") or {})
+        elif kind == "message_end":
+            self.message(event.get("message") or {})
+        elif kind == "tool_execution_start":
+            self.args[event.get("toolCallId")] = event.get("args") or {}
+        elif kind == "tool_execution_end":
+            self.tool(event)
+        elif kind == "agent_end":
+            self.ended = True
+
+    def piece(self, event):
+        kind = event.get("type")
+        if kind == "text_delta":
+            self.streamed_text.add(self.current)
+            self.emit.say(event.get("delta", ""))
+        elif kind == "thinking_delta":
+            self.streamed_think.add(self.current)
+            self.emit.think(event.get("delta", ""))
+
+    def message(self, message):
+        role = message.get("role")
+        if role != "assistant":
+            return
+        response = message.get("responseId")
+        self.usage_of(message)
+        if message.get("stopReason") == "error" and self.error is None:
+            self.error = message_text(message)
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and response not in self.streamed_text:
+                self.emit.say(block.get("text", ""))
+            elif block.get("type") == "thinking" and response not in self.streamed_think:
+                self.emit.think(block.get("thinking", block.get("text", "")))
+
+    def mcp_name(self, name):
+        if not name.startswith("mcp__"):
+            return None
+        rest = name[len("mcp__"):]
+        best = None
+        for label in self.labels:
+            prefix = re.sub(r"[^A-Za-z0-9]", "_", label) + "_"
+            if rest.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+                best = (prefix, label)
+        if best:
+            return best[1], rest[len(best[0]):]
+        server, _, tool = rest.partition("_")
+        return server, tool
+
+    def tool(self, event):
+        name = event.get("toolName") or ""
+        given = self.args.pop(event.get("toolCallId"), None) or event.get("args") or {}
+        result = event.get("result") or {}
+        output, failed = text_of(result.get("content")), bool(result.get("isError"))
+        details = result.get("details") or {}
+        trace = details.get("trace") or {}
+        code = trace.get("status")
+        if not isinstance(code, int):
+            code = 1 if failed else 0
+
+        if name == "bash":
+            self.emit.ran(given.get("command", ""), stdout="" if failed else output,
+                          stderr=output if failed else "", exit_code=code)
+        elif name == "write":
+            path = str(given.get("path", ""))
+            if path.startswith("out://"):
+                self.emit.say(str(given.get("content", "")))
+            else:
+                self.emit.wrote(path, lines_of(given.get("content", ""), "+"))
+        elif name in ("edit", "apply_patch"):
+            self.edit(name, given, output, failed)
+        else:
+            mcp = self.mcp_name(name)
+            if mcp:
+                self.emit.called(mcp[0], mcp[1], given, output=None if failed else output,
+                                 error=output if failed else None)
+            else:
+                self.emit.used(name, json.dumps(given), output)
+
+    def edit(self, name, given, output, failed):
+        path = str(given.get("path") or "")
+        if not path:
+            found = re.search(r"\[([^\]#]+)#[0-9A-Fa-f]{4}\]", str(given.get("input", "")))
+            if not found:
+                found = re.search(r"\*\*\* (?:Add|Update|Delete) File: (.+)", str(given.get("input", "")))
+            path = found.group(1).strip() if found else "patch"
+        if "old_string" in given or "new_string" in given:
+            diff = lines_of(given.get("old_string", ""), "-") + lines_of(given.get("new_string", ""), "+")
+        elif given.get("edits"):
+            diff = "".join(str(edit.get("diff", "")) for edit in given["edits"] if isinstance(edit, dict))
+        else:
+            diff = str(given.get("input", ""))
+        self.emit.edited(path, diff[:DIFF_MAX])
+
+    def terminal(self):
+        usage = {
+            "input_tokens": self.usage["input"] + self.usage["cacheRead"] + self.usage["cacheWrite"],
+            "output_tokens": self.usage["output"],
+            "input_tokens_details": {"cached_tokens": self.usage["cacheRead"]},
+        }
+        if self.error:
+            self.emit.failed("provider_error", self.error[:2000], usage)
+        else:
+            self.emit.done(usage)
+
+
+def turn(request, emit, state, session):
+    hgkit.seed()
+    write_configuration(request)
+    cli = hgkit.Cli(command(request, session), env=environment(), stdin=request.brief(instructions=False))
+    translator = Translator(emit, state, request)
+    saw_session = False
+    for line in cli.lines():
+        saw_session = saw_session or '"type":"session"' in line or '"type": "session"' in line
+        if not translator.ended and not translator.error:
+            translator.read(line)
+    return translator, cli.exit_code, saw_session
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    session = state.get("session")
+    translator, code, saw_session = turn(request, emit, state, session)
+    if session and not saw_session and not translator.ended and not translator.error and code != 0:
+        # Its own record of the session is gone (a stopped turn can leave it so): start a new one.
+        emit.log(f"omp could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code, _ = turn(request, emit, state, None)
+    if translator.ended:
+        translator.terminal()
+    elif translator.error:
+        translator.terminal()
+    else:
+        emit.failed("cli_exit", f"omp exited with code {code} without finishing a turn.")
+
+
+if __name__ == "__main__":
+    main()

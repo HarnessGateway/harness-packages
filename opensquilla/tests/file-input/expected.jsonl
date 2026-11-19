@@ -1,0 +1,11 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "ctc_0001", "type": "custom_tool_call", "call_id": "call_0001", "name": "read_file", "input": "{\"path\": \"inputs/notes.txt\"}"}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "ctc_0001", "type": "custom_tool_call", "call_id": "call_0001", "name": "read_file", "input": "{\"path\": \"inputs/notes.txt\"}"}}
+{"type": "response.output_item.added", "output_index": 1, "item": {"id": "ctco_0001", "type": "custom_tool_call_output", "call_id": "call_0001", "status": "completed", "output": "1\tProject codename: Bluebird.\n2\tDeadline: Friday.\n"}}
+{"type": "response.output_item.done", "output_index": 1, "item": {"id": "ctco_0001", "type": "custom_tool_call_output", "call_id": "call_0001", "status": "completed", "output": "1\tProject codename: Bluebird.\n2\tDeadline: Friday.\n"}}
+{"type": "response.output_item.added", "output_index": 2, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "delta": "Bluebird", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "text": "Bluebird", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "part": {"type": "output_text", "text": "Bluebird", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 2, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Bluebird", "annotations": []}]}}
+{"type": "hg.done", "usage": {"input_tokens": 22501, "output_tokens": 44, "input_tokens_details": {"cached_tokens": 22016}}}

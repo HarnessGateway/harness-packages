@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""One turn of DeepSeek Harness (dsh): run one headless task, and say in Responses events what it does.
+
+`dsh --profile headless --json` prints one JSON object per line: an opening `session`, `status` boundaries,
+the committed `thinking` and `text` of each step, `tool_call` / `tool_result`, and a closing `final` with the
+durable turn reason and the answer. This file translates those lines to Responses events.
+"""
+
+import json
+import os
+import re
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+DSH = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "dsh")
+DIFF_MAX = 100_000
+
+# OpenAI's reasoning efforts onto the Messages transport's own four.
+EFFORT = {"minimal": "low", "low": "low", "medium": "high", "high": "high", "xhigh": "max", "max": "max"}
+
+
+def environment():
+    """dsh is told its provider through the DeepSeek Messages variables; its home stays in the mind."""
+    env = dict(os.environ)
+    env.update({
+        "DSH_HOME": os.path.join(os.environ["HG_MIND"], ".dsh"),
+        "DEEPSEEK_BASE_URL": os.environ["HG_PROVIDER_URL"],
+        # The key is a placeholder; the platform's proxy puts the real value in on the way out.
+        "DEEPSEEK_API_KEY": os.environ["HG_PROVIDER_KEY"],
+        "DSH_TELEMETRY_DISABLED": "1",
+    })
+    return env
+
+
+def patch_file(request):
+    """The overlay dsh runs with: the request's model (and effort), and the request's MCP servers.
+
+    dsh takes its default model from the `agent-default-model` row, so the turn's model is written there.
+    An MCP server becomes one `dsh-mcp-client` row, reachable over Streamable HTTP.
+    """
+    entries = [{
+        "id": "agent-default-model",
+        "config": {
+            "provider": "deepseek-official",
+            "model": request.model,
+            **({"reasoningEffort": EFFORT[request.effort]} if request.effort in EFFORT else {}),
+        },
+    }]
+    servers = []
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not isinstance(label, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", label):
+            continue
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
+        config = {
+            "serverName": label,
+            "transport": "streamable-http",
+            "url": url,
+            # A one-shot turn must not wait on a server that is slow or gone.
+            "startupTimeoutMs": 15000,
+            "reconnect": {"enabled": False},
+        }
+        if isinstance(server.get("headers"), dict) and server["headers"]:
+            config["headers"] = {str(name): str(value) for name, value in server["headers"].items()}
+        servers.append({"id": f"mcp-{label}", "name": "@deepseek-ai/dsh-mcp-client", "config": config})
+    if servers:
+        entries.append({"insert": servers})
+    # The overlay is this turn's own: /tmp is lost with the turn, so request headers never enter the mind.
+    path = os.path.join(tempfile.gettempdir(), f"dsh-patch-{os.getpid()}.json")
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(entries, file)
+    return path
+
+
+def command(request, session):
+    args = [DSH, "--profile", "headless", "--patch", patch_file(request),
+            "--json", "--permission-mode", "danger-full-access", "--approval-policy", "never"]
+    if session:
+        args += ["--session-id", session]
+    return args
+
+
+def rel(path):
+    """dsh reports absolute paths; the caller sees paths as the workspace holds them."""
+    work = os.environ["HG_WORK"]
+    try:
+        if os.path.commonpath([os.path.abspath(path), work]) == work:
+            return os.path.relpath(path, work)
+    except (ValueError, TypeError):
+        pass
+    return path
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def bash_output(text):
+    """dsh renders a run as stdout, then a `[stderr]` section, then markers; the exit code is one marker."""
+    code = 0
+    match = re.search(r"\n?\[exit code: (-?\d+)\]\s*$", text)
+    if match:
+        code, text = int(match.group(1)), text[:match.start()]
+    elif text.strip() == "(no output)":
+        text = ""
+    if text.startswith("[stderr]\n"):
+        return "", text[len("[stderr]\n"):], code
+    if "\n[stderr]\n" in text:
+        stdout, _, stderr = text.partition("\n[stderr]\n")
+        return stdout, stderr, code
+    return text, "", code
+
+
+def patch_operations(text):
+    """`apply_patch` input to (operation, path, diff) triples; the base composition leaves this tool off."""
+    found, path, lines = [], "", []
+    kind = "update_file"
+
+    def flush():
+        if path:
+            found.append((kind, path, "".join(lines)))
+
+    for line in text.splitlines(keepends=True):
+        if line.startswith("*** Add File: "):
+            flush()
+            kind, path, lines = "create_file", line[len("*** Add File: "):].strip(), []
+        elif line.startswith("*** Update File: "):
+            flush()
+            kind, path, lines = "update_file", line[len("*** Update File: "):].strip(), []
+        elif line.startswith("*** Delete File: "):
+            flush()
+            found.append(("delete_file", line[len("*** Delete File: "):].strip(), ""))
+            path, lines = "", []
+        elif line.startswith("*** ") or (path and not line.startswith(("+", "-"))):
+            continue
+        elif path and line.startswith("+"):
+            lines.append(line)
+        elif path and line.startswith("-"):
+            lines.append(line)
+    flush()
+    return found
+
+
+class Translator:
+    """dsh's `--json` lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}                 # dsh call id -> (tool name, input)
+        self.usage = {}                 # summed step usage, in dsh's names
+        self.ended = False
+        self.spoke = False              # whether anything of the agent's work was already printed
+        self.error = ""                 # a driver-level error event: no durable turn was produced
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # not JSON: something it printed aside
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "session":
+            if isinstance(event.get("sessionId"), str) and event["sessionId"]:
+                self.state.set("session", event["sessionId"])
+        elif kind == "thinking":
+            self.spoke = True
+            self.emit.think(str(event.get("text") or ""))
+        elif kind == "text":
+            self.spoke = True
+            self.emit.say(str(event.get("text") or ""))
+        elif kind == "tool_call":
+            self.spoke = True
+            self.calls[event.get("callId")] = (str(event.get("tool") or ""), event.get("input"))
+        elif kind == "tool_result":
+            self.spoke = True
+            self.result(event)
+        elif kind == "status" and event.get("phase") == "step_end" and isinstance(event.get("usage"), dict):
+            self.count(event["usage"])
+        elif kind == "error":
+            self.error = str(event.get("message") or "")
+            self.emit.log(self.error)
+        elif kind == "final":
+            self.final(event)
+
+    def count(self, usage):
+        for name in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"):
+            value = usage.get(name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                self.usage[name] = self.usage.get(name, 0) + value
+
+    def result(self, event):
+        call_id = event.get("callId")
+        name, given = self.calls.pop(call_id, ("", None))
+        output = str(event.get("result") or "")
+        failed = event.get("status") == "error"
+        given = given if isinstance(given, dict) else {}
+        if name == "bash":
+            stdout, stderr, code = bash_output(output)
+            if failed:
+                stdout, stderr, code = "", output, 1
+            self.emit.ran(str(given.get("command") or ""), stdout=stdout, stderr=stderr, exit_code=code)
+        elif name in ("write", "edit") and not failed:
+            path, diff = rel(str(given.get("file_path") or "")), ""
+            if name == "write":
+                diff = lines_of(str(given.get("content") or ""), "+")
+            else:
+                diff = lines_of(str(given.get("old_string") or ""), "-") + \
+                       lines_of(str(given.get("new_string") or ""), "+")
+            (self.emit.wrote if name == "write" else self.emit.edited)(path, diff)
+        elif name == "apply_patch" and not failed:
+            for operation, path, diff in patch_operations(str(given.get("input") or "")):
+                if operation == "delete_file":
+                    self.emit.deleted(rel(path))
+                else:
+                    (self.emit.wrote if operation == "create_file" else self.emit.edited)(rel(path), diff[:DIFF_MAX])
+        elif name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            error = None
+            if failed:
+                error = output or json.dumps(event.get("error") or {}, ensure_ascii=False)
+            self.emit.called(server, tool, given, output=None if failed else output, error=error)
+        elif name:
+            self.emit.used(name, json.dumps(given, ensure_ascii=False), output)
+        else:
+            self.emit.log(f"a tool result for an unknown call: {call_id}")
+
+    def usage_object(self):
+        if not self.usage:
+            return None
+        cached, created = self.usage.get("cacheReadTokens", 0), self.usage.get("cacheWriteTokens", 0)
+        usage = {
+            "input_tokens": self.usage.get("inputTokens", 0) + cached + created,   # Responses counts cache in
+            "output_tokens": self.usage.get("outputTokens", 0),
+            "input_tokens_details": {"cached_tokens": cached},
+        }
+        if self.usage.get("reasoningTokens"):
+            usage["output_tokens_details"] = {"reasoning_tokens": self.usage["reasoningTokens"]}
+        return usage
+
+    def final(self, event):
+        self.ended = True
+        reason = event.get("reason")
+        self.reason = reason
+        usage = self.usage_object()
+        kind = reason.get("kind") if isinstance(reason, dict) else None
+        if kind == "completed":
+            return self.emit.done(usage)
+        if kind == "max-tokens":
+            return self.emit.incomplete("max_output_tokens", usage)
+        if kind == "error":
+            error = reason.get("error") if isinstance(reason.get("error"), dict) else {}
+            code = str(error.get("code") or "cli_error")
+            message = str(error.get("message") or "dsh ended with an error").strip()
+            if code.upper() == "CONTENT_REFUSED":
+                return self.emit.incomplete("content_filter", usage)
+            return self.emit.failed(normalise(code), message[:2000], usage)
+        if kind in ("blocked", "interrupted", "aborted"):
+            return self.emit.failed(normalise(kind), f"dsh ended the turn: {kind}.", usage)
+        if kind:
+            return self.emit.failed(normalise(str(kind)), f"dsh ended the turn: {kind}.", usage)
+        return self.emit.failed("cli_exit", "dsh ended without a turn outcome.", usage)
+
+
+def normalise(code):
+    code = re.sub(r"[^a-z0-9_]+", "_", code.lower()).strip("_")
+    return code or "cli_error"
+
+
+def turn(request, emit, state, session):
+    """Run the CLI once. Returns its translator and its exit code."""
+    hgkit.seed()
+    cli = hgkit.Cli(command(request, session), env=environment(), stdin=request.brief())
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    try:
+        session = state.get("session")
+        translator, code = turn(request, emit, state, session)
+        if session and not translator.ended and not translator.spoke and code != 0:
+            # Its own record of the session is gone or unusable (a stopped turn can leave it so): start a new one.
+            emit.log(f"dsh could not resume session {session} (exit code {code}); starting a new one")
+            state.clear("session")
+            translator, code = turn(request, emit, state, None)
+        if not translator.ended:
+            said = translator.error or f"dsh exited with code {code} without a turn outcome."
+            emit.failed("cli_exit", said[:2000], translator.usage_object())
+    except OSError as failure:
+        emit.failed("cli_start", f"dsh could not start: {failure}")
+    except Exception as failure:  # noqa: BLE001 - a turn always ends with a terminal line
+        emit.failed("cli_error", f"dsh did not finish cleanly: {failure}")
+
+
+if __name__ == "__main__":
+    main()

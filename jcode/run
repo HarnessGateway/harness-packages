@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""One turn of J-Code (jcode): `jcode run --ndjson`, translated to Responses events.
+
+J-Code prints one JSON object per line while a headless run works: its session id and route, text deltas,
+tool calls with their streamed arguments, a `tool_done` with the result, per-request token counts, and one
+last `done` line. This file starts it against the turn's provider and says each of those as an event.
+"""
+
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+JCODE = os.path.join(os.environ["HG_HARNESS"], "tools", "bin", "jcode")
+DIFF_MAX = 100_000
+OUTPUT_MAX = 200_000
+
+BASH_END = re.compile(r"\n*(?:--- Command finished with exit code: (-?\d+) ---|Exit code: (-?\d+))\s*$")
+
+
+def jcode_home():
+    """J-Code keeps its sessions, config and logs under $JCODE_HOME; keep them in the mind."""
+    return os.path.join(os.environ["HOME"], ".jcode")
+
+
+def api_base(url, suffix):
+    url = url.rstrip("/")
+    return url if url.endswith(suffix) else url + suffix
+
+
+def config_toml(api, model, effort):
+    """The config jcode reads for this turn: an effort, and (for Anthropic and chat) a provider profile.
+
+    A named profile is how jcode is told a base URL, a key variable and the models it serves without
+    pretending to be one of its built-in providers; the chat path selects it with `--provider-profile`.
+    The Anthropic path drives jcode's native runtime, whose values are in its environment instead.
+    """
+    url = os.environ["HG_PROVIDER_URL"].rstrip("/")
+    lines = []
+    if effort and api != "gemini":
+        lines += ["[provider]",
+                  f'{("anthropic" if api == "anthropic" else "openai")}_reasoning_effort = {json.dumps(effort)}',
+                  ""]
+    if api == "anthropic":
+        lines += ["[providers.harness]",
+                  'type = "anthropic-compatible"',
+                  f"base_url = {json.dumps(api_base(url, '/v1'))}",
+                  'api_key_env = "HG_PROVIDER_KEY"',
+                  'auth = "header"',
+                  'auth_header = "x-api-key"',
+                  f"default_model = {json.dumps(model)}",
+                  "", "[[providers.harness.models]]", f"id = {json.dumps(model)}"]
+    elif api == "openai-chat":                       # OpenAI-compatible chat completions
+        lines += ["[providers.harness]",
+                  'type = "openai-compatible"',
+                  f"base_url = {json.dumps(url)}",
+                  'api_key_env = "HG_PROVIDER_KEY"',
+                  'auth = "bearer"',
+                  f"default_model = {json.dumps(model)}",
+                  "", "[[providers.harness.models]]", f"id = {json.dumps(model)}"]
+    return "\n".join(lines) + "\n"
+
+
+def write_files(request):
+    """Write the config and the request's MCP servers into the mind, where jcode reads them."""
+    home = jcode_home()
+    os.makedirs(home, exist_ok=True)
+    api, model = os.environ["HG_PROVIDER_API"], os.environ["HG_MODEL"]
+    with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as file:
+        file.write(config_toml(api, model, request.effort))
+    servers = {}
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not label or not url:
+            continue
+        entry = {"type": "http", "url": url}
+        if isinstance(server.get("headers"), dict) and server["headers"]:
+            entry["headers"] = server["headers"]
+        servers[label] = entry
+    with open(os.path.join(home, "mcp.json"), "w", encoding="utf-8") as file:
+        json.dump({"mcpServers": servers}, file)
+    if api == "openai-responses":
+        # Jcode's native OpenAI runtime accepts only models in its catalog and otherwise silently
+        # substitutes its default. Declare the turn's model under the API key's catalog scope so the
+        # request runs the model the caller named.
+        scope = "api-key::" + hashlib.sha256(os.environ["HG_PROVIDER_KEY"].encode()).hexdigest()[:16]
+        catalog = {"scopes": {scope: {
+            "models": [model], "context_limits": {}, "reasoning_efforts": {}, "service_tiers": {},
+            "observed_at_unix_secs": 4102444800}}}
+        config = os.path.join(home, "config", "jcode")
+        os.makedirs(config, exist_ok=True)
+        with open(os.path.join(config, "openai_model_catalog_cache.json"), "w", encoding="utf-8") as file:
+            json.dump(catalog, file)
+
+
+def environment():
+    """J-Code told where its home is, and told to act without updating or reporting as it does."""
+    env = dict(os.environ)
+    env.update({
+        "JCODE_HOME": jcode_home(),
+        "JCODE_NO_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+        "JCODE_RUN_AUTO_POKE": "0",             # one turn, not the extra self-review turns
+        "JCODE_DISABLE_CLAUDE_MCP": "1",        # the request's MCP servers are the whole set
+        "JCODE_DISABLE_PRICING_REFRESH": "1",   # no models.dev catalogue fetch during a turn
+        "JCODE_NON_INTERACTIVE": "1",
+        "NO_COLOR": "1",
+    })
+    api = os.environ["HG_PROVIDER_API"]
+    if api == "anthropic":
+        # Jcode's native Anthropic runtime. Its model comes from JCODE_ANTHROPIC_MODEL, not --model:
+        # that keeps an arbitrary provider model id out of its built-in Anthropic validation, on a
+        # resumed session too.
+        base = api_base(os.environ["HG_PROVIDER_URL"], "/v1")
+        env.update({
+            "ANTHROPIC_API_KEY": os.environ["HG_PROVIDER_KEY"],
+            "ANTHROPIC_BASE_URL": base,
+            "JCODE_ANTHROPIC_API_BASE": base,
+            "JCODE_ANTHROPIC_AUTH": "header",
+            "JCODE_ANTHROPIC_AUTH_HEADER": "x-api-key",
+            "JCODE_ANTHROPIC_MODEL": os.environ["HG_MODEL"],
+            "JCODE_RUNTIME_PROVIDER": "anthropic-api",
+        })
+    elif api == "openai-chat":
+        env.update({
+            "JCODE_NAMED_PROVIDER_PROFILE": "harness",
+            "JCODE_OPENROUTER_API_BASE": os.environ["HG_PROVIDER_URL"].rstrip("/"),
+            "JCODE_OPENROUTER_API_KEY_NAME": "HG_PROVIDER_KEY",
+            "JCODE_OPENROUTER_CACHE_NAMESPACE": "harness",
+            "JCODE_OPENROUTER_PROVIDER_FEATURES": "0",
+            "JCODE_OPENROUTER_STATIC_MODELS": os.environ["HG_MODEL"],
+            "JCODE_OPENROUTER_TRANSPORT_STATE": "direct-api-key",
+            "JCODE_OPENROUTER_MODEL": os.environ["HG_MODEL"],
+            "JCODE_RUNTIME_PROVIDER": "openai-compatible",
+        })
+    if api == "openai-responses":
+        # Jcode's native OpenAI runtime speaks the Responses API and appends /responses to this base.
+        env.update({
+            "JCODE_OPENAI_API_BASE": os.environ["HG_PROVIDER_URL"].rstrip("/"),
+            "OPENAI_BASE_URL": os.environ["HG_PROVIDER_URL"].rstrip("/"),
+            "OPENAI_API_KEY": os.environ["HG_PROVIDER_KEY"],
+            "JCODE_OPENAI_MODEL": os.environ["HG_MODEL"],
+        })
+    elif api == "gemini":
+        # Its native Gemini runtime appends /v1beta and the model method to this endpoint.
+        env.update({
+            "GEMINI_API_ENDPOINT": os.environ["HG_PROVIDER_URL"].rstrip("/"),
+            "GEMINI_API_VERSION": "v1beta",
+            "GEMINI_API_KEY": os.environ["HG_PROVIDER_KEY"],
+            "GOOGLE_API_KEY": os.environ["HG_PROVIDER_KEY"],
+            "JCODE_GEMINI_MODEL": os.environ["HG_MODEL"],
+        })
+    return env
+
+
+def command(request, session):
+    """jcode's headless one-message command, for the API this provider was given."""
+    api = os.environ["HG_PROVIDER_API"]
+    args = [JCODE, "--quiet", "--no-update", "--no-selfdev", "--socket", "/tmp/jcode.sock"]
+    if session:
+        args += ["--resume", session]
+    if api == "anthropic":
+        args += ["--provider", "anthropic-api"]     # the model comes from JCODE_ANTHROPIC_MODEL
+    elif api == "openai-chat":
+        args += ["--provider-profile", "harness", "--model", os.environ["HG_MODEL"]]
+    elif api == "openai-responses":
+        args += ["--provider", "openai-api"]        # the model comes from JCODE_OPENAI_MODEL
+    elif api == "gemini":
+        args += ["--provider", "gemini"]            # the model comes from JCODE_GEMINI_MODEL
+    args += ["run", "--ndjson", request.brief()]
+    return args
+
+
+def text_of(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())
+
+
+class Usage:
+    """The turn's tokens: one count per provider request, summed.
+
+    Jcode reports each request's counts (`tokens`), often twice; a new request begins at a
+    `connection_phase` of `sending request`. It keeps only the last request's counts in `done.usage`, so
+    counting the reports is the only way to account for a turn that called tools.
+    """
+
+    def __init__(self):
+        self.input = self.output = self.cached = 0
+        self._open = None
+
+    def commit(self):
+        if self._open is not None:
+            counted = self._open
+            self.input += (counted.get("input") or 0) + (counted.get("cache_read_input") or 0) \
+                + (counted.get("cache_creation_input") or 0)
+            self.output += counted.get("output") or 0
+            self.cached += counted.get("cache_read_input") or 0
+            self._open = None
+
+    def as_dict(self):
+        return {"input_tokens": self.input, "output_tokens": self.output,
+                "input_tokens_details": {"cached_tokens": self.cached}}
+
+
+class Translator:
+    """J-Code's NDJSON lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.tool = None                 # the tool_start whose arguments are still arriving
+        self.usage = Usage()
+        self.done = False
+        self.error = None
+        self.stop_reason = None
+        self.started = False
+        self.said = False
+        self.model = None
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                              # not JSON: something it printed aside
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind in ("start", "session"):
+            self.session(event.get("session_id"))
+            if kind == "start":
+                self.started = True
+                self.model = event.get("model") or self.model
+        elif kind == "text_delta":
+            text = event.get("text", "")
+            if text:
+                self.said = True
+                self.emit.say(text)
+        elif kind == "text_replace":
+            text = event.get("text", "")
+            if self.said:
+                self.emit.log("jcode replaced assistant text already sent; the correction cannot be "
+                              "rewound, so the caller has the text as it first streamed")
+            elif text:
+                self.said = True
+                self.emit.say(text)
+        elif kind == "text_suffix_replace":
+            self.emit.log(f"jcode corrected the end of the assistant text "
+                          f"({event.get('old_text', '')!r} -> {event.get('new_text', '')!r})")
+        elif kind == "tool_start":
+            self.begin(event)
+        elif kind == "tool_input":
+            if self.tool is not None:
+                self.tool["input"] += event.get("delta", "")
+            else:
+                self.emit.log(f"tool input with no tool start: {event.get('delta', '')[:200]}")
+        elif kind == "tool_exec":
+            pass                                                # the call is under way; its result follows
+        elif kind == "tool_done":
+            self.finish(event)
+        elif kind == "message_end":
+            self.stop_reason = event.get("stop_reason") or self.stop_reason
+        elif kind == "tokens":
+            self.usage._open = event                            # the latest count for this request
+        elif kind == "connection_phase":
+            if event.get("phase") == "sending request":
+                self.usage.commit()
+        elif kind == "error":
+            self.error = text_of(event.get("message")) or "jcode reported an error"
+        elif kind == "done":
+            self.done = True
+            self.model = event.get("model") or self.model
+        elif kind in ("connection_type", "service_tier", "status_detail", "upstream_provider",
+                      "compaction", "memory_injected", "interrupted", "batch_progress",
+                      "auto_poke", "auto_poke_stopped", "auto_poke_dependency_resolved",
+                      "auto_poke_confidence_summary"):
+            pass                                                # bookkeeping, not something the agent did
+        else:
+            self.emit.log(line)
+
+    def session(self, session_id):
+        if not isinstance(session_id, str) or not session_id:
+            return
+        if self.state.get("session") != session_id:
+            self.state.set("session", session_id)               # saved the moment it is reported
+
+    def begin(self, event):
+        if self.tool is not None:
+            self.emit.log(f"jcode started tool {event.get('name')} before {self.tool['name']} finished")
+            self.used(self.tool, "", "the CLI did not report this call's result")
+        self.tool = {"id": event.get("id", ""), "name": event.get("name", ""), "input": ""}
+
+    def finish(self, event):
+        tool = self.tool or {"id": event.get("id", ""), "name": event.get("name", ""), "input": ""}
+        if event.get("id") and tool.get("id") and event["id"] != tool["id"]:
+            self.emit.log(f"jcode reported tool {event.get('id')} done while {tool['id']} was open")
+        name = event.get("name") or tool["name"]
+        raw, output, error = tool["input"], text_of(event.get("output")), event.get("error")
+        self.tool = None
+        try:
+            given = json.loads(raw) if raw.strip() else {}
+            if not isinstance(given, dict):
+                given = {}
+        except ValueError:
+            given = {}
+            self.emit.log(f"jcode's arguments for {name} were not JSON: {raw[:500]}")
+        if name == "bash":
+            self.bash(given, output, error)
+        elif name == "write" and not error:
+            self.emit.wrote(str(given.get("file_path", "")),
+                            lines_of(str(given.get("content", "")), "+")[:DIFF_MAX])
+        elif name == "edit" and not error:
+            edits = given.get("edits") or [given]
+            diff = "".join(lines_of(str(edit.get("old_string", "")), "-")
+                           + lines_of(str(edit.get("new_string", "")), "+")
+                           for edit in edits if isinstance(edit, dict))
+            self.emit.edited(str(given.get("file_path", "")), diff[:DIFF_MAX])
+        elif name == "apply_patch" and not error and self.patch(str(given.get("patch_text", ""))):
+            pass
+        elif name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            self.emit.called(server, tool, given, output=None if error else output[:OUTPUT_MAX],
+                             error=text_of(error)[:OUTPUT_MAX] if error else None)
+        else:
+            self.used({"name": name, "input": raw}, output, error, given)
+
+    def bash(self, given, output, error):
+        code = 1 if error else 0
+        counted = BASH_END.search(output)
+        if counted:
+            code = int(counted.group(1) if counted.group(1) is not None else counted.group(2))
+            output = output[:counted.start()].rstrip("\n")
+        text = text_of(error) if error else output
+        self.emit.ran(str(given.get("command", "")), stdout="" if error else text[:OUTPUT_MAX],
+                      stderr=text[:OUTPUT_MAX] if error else "", exit_code=code)
+
+    def used(self, tool, output, error, given=None):
+        name = tool.get("name", "")
+        arguments = json.dumps(given) if given is not None else (tool.get("input") or "{}")
+        self.emit.used(name, arguments[:DIFF_MAX], text_of(error if error else output)[:OUTPUT_MAX])
+
+    def patch(self, text):
+        """A Codex-style patch, as file operations. False when it cannot be read as one."""
+        operation, added, changed, deleted, seen = None, {}, {}, [], False
+        for line in text.splitlines():
+            if line.startswith("*** Add File: "):
+                operation, seen = ("add", line[len("*** Add File: "):].strip()), True
+            elif line.startswith("*** Update File: "):
+                operation, seen = ("update", line[len("*** Update File: "):].strip()), True
+            elif line.startswith("*** Delete File: "):
+                operation = ("delete", line[len("*** Delete File: "):].strip())
+                seen = True
+                deleted.append(operation[1])
+            elif line.startswith("*** "):
+                operation = None
+            elif operation and operation[0] == "add" and line.startswith("+"):
+                added.setdefault(operation[1], []).append(line[1:])
+            elif operation and operation[0] == "update" and line[:1] in "+-":
+                changed.setdefault(operation[1], []).append(line)
+        if not seen:
+            return False
+        for path, content in added.items():
+            self.emit.wrote(path, lines_of("\n".join(content), "+")[:DIFF_MAX])
+        for path, diff in changed.items():
+            self.emit.edited(path, ("\n".join(diff) + "\n")[:DIFF_MAX])
+        for path in deleted:
+            self.emit.deleted(path)
+        return True
+
+
+def attempt(request, emit, state, session):
+    translator = Translator(emit, state)
+    err = tempfile.NamedTemporaryFile(prefix="jcode-stderr-", suffix=".log", delete=False)
+    err.close()
+    # Keep jcode's standard error for this turn's log and for a failed turn's message; the shell execs
+    # jcode in place, so the kit still stops the CLI itself.
+    wrapped = ["/bin/sh", "-c", 'err=$1; shift; exec "$@" 2>"$err"', "jcode", err.name]
+    cli = hgkit.Cli(wrapped + command(request, session), env=environment())
+    try:
+        for line in cli.lines():
+            translator.read(line)
+    finally:
+        with open(err.name, encoding="utf-8", errors="replace") as file:
+            stderr = file.read()
+        os.unlink(err.name)
+        if stderr:
+            sys.stderr.write(stderr)
+    return translator, cli.exit_code, stderr
+
+
+def last_line(stderr):
+    for line in reversed(stderr.splitlines()):
+        if line.strip():
+            return line.strip()[:2000]
+    return ""
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    write_files(request)
+    session = state.get("session")
+    translator, code, stderr = attempt(request, emit, state, session)
+    if session and not translator.started and code != 0:
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): start anew.
+        emit.log(f"jcode could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code, stderr = attempt(request, emit, state, None)
+    translator.usage.commit()
+    usage = translator.usage.as_dict()
+    if translator.error:
+        emit.failed("provider_error", translator.error[:2000], usage)
+    elif not os.environ.get("HG_CHECK") and translator.done and translator.model \
+            and translator.model != os.environ["HG_MODEL"]:
+        # jcode's native OpenAI runtime substitutes its default for a model it does not know; never
+        # report a different model's answer as the requested one.
+        emit.failed("model_mismatch", f"jcode ran model '{translator.model}' instead of the requested "
+                    f"'{os.environ['HG_MODEL']}'", usage)
+    elif translator.done:
+        if translator.stop_reason in ("max_tokens", "length"):
+            emit.incomplete("max_output_tokens", usage)
+        elif translator.stop_reason in ("content_filter", "refusal", "safety"):
+            emit.incomplete("content_filter", usage)
+        else:
+            emit.done(usage)
+    else:
+        said = last_line(stderr)
+        emit.failed("cli_exit", f"jcode exited with code {code} without finishing the turn"
+                    + (f": {said}" if said else "."), usage)
+
+
+if __name__ == "__main__":
+    main()

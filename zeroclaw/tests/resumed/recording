@@ -1,0 +1,17 @@
+{"jsonrpc":"2.0","result":{"_meta":{"zeroclaw":{"defaultModel":"deepseek-flash","maxSessions":10,"sessionTimeoutSecs":3600}},"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":false,"sse":false},"promptCapabilities":{"audio":false,"embeddedContext":true,"image":false},"sessionCapabilities":{"close":{},"resume":{}}},"agentInfo":{"name":"zeroclaw-acp","title":"ZeroClaw ACP","version":"0.9.0"},"authMethods":[],"protocolVersion":1},"id":1}
+{"jsonrpc":"2.0","result":{},"id":2}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":"It","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" printed","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" `","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":"hello","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":"`","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" —","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" one","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" word","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":",","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" lowercase","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":",","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" no","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":" punctuation","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","update":{"content":{"text":".","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","result":{"content":"It printed `hello` — one word, lowercase, no punctuation.","sessionId":"70d38b17-f05c-4eb0-82fc-afbce65c2a84","stopReason":"end_turn"},"id":3}

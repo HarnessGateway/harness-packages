@@ -1,0 +1,66 @@
+#!/bin/sh
+# Installs the goose CLI at a pinned version under $HG_HARNESS/tools, from the release archive its makers publish.
+#
+# goose's own install script (download_cli.sh) fetches the same archive, but through bzip2, which the default
+# image does not have; this takes the gzip archive of the same release instead. The build is chosen here by
+# `uname`, never pinned to one CPU architecture.
+set -eu
+
+VERSION=1.60.1
+TAG="v$VERSION"
+
+for need in curl tar; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: goose's release archive is fetched with curl and unpacked with tar" >&2
+    exit 1
+  }
+done
+
+case "$(uname -s)" in
+  Linux) ;;
+  *)
+    echo "goose publishes Linux and macOS builds; this package installs the Linux one" >&2
+    exit 1
+    ;;
+esac
+
+case "$(uname -m)" in
+  x86_64|amd64) ARCH=x86_64 ;;
+  aarch64|arm64) ARCH=aarch64 ;;
+  *)
+    echo "goose publishes no Linux build for $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+VARIANT=gnu
+if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+  VARIANT=musl
+fi
+
+TOOLS="$HG_HARNESS/tools"
+mkdir -p "$TOOLS/bin" "$TOOLS/.download"
+cd "$TOOLS/.download"
+
+FILE="goose-$ARCH-unknown-linux-$VARIANT.tar.gz"
+URL="https://github.com/aaif-goose/goose/releases/download/$TAG/$FILE"
+if ! curl -fsSL --retry 3 --retry-delay 2 -o "$FILE" "$URL"; then
+  echo "could not download $URL" >&2
+  echo "an environment must allow github.com (and release-assets.githubusercontent.com) for this install" >&2
+  exit 1
+fi
+
+tar -xzf "$FILE"
+[ -f goose ] || { echo "$FILE did not contain a goose binary" >&2; exit 1; }
+cp goose "$TOOLS/bin/goose"
+chmod 0755 "$TOOLS/bin/goose"
+
+cd /
+rm -rf "$TOOLS/.download"
+
+got=$("$TOOLS/bin/goose" --version 2>/dev/null | head -n 1 | tr -d '[:space:]')
+[ "$got" = "$VERSION" ] || {
+  echo "installed goose ${got:-nothing}, wanted $VERSION" >&2
+  exit 1
+}
+echo "goose $got installed"

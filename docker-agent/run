@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""One turn of Docker Agent: run the docker-agent CLI headless, and say in Responses events what it does.
+
+The CLI is configured with a small agent file written for this turn (model, provider endpoint, toolsets) and
+started with `run --exec --json`, which prints one JSON object per runtime event on standard output. The
+session is the CLI's own SQLite database under the mind; its id is chosen here so a stopped turn's session can
+be resumed by the next one.
+"""
+
+import json
+import os
+import re
+import shlex
+import sys
+import uuid
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+CLI = os.path.join(os.environ["HG_HARNESS"], "tools", "docker-agent")
+DIFF_MAX = 100_000
+ERROR_MAX = 8_000
+
+# How each provider API the platform may hand this turn is configured for docker-agent.
+APIS = {
+    "anthropic": {"provider": "anthropic", "key": "ANTHROPIC_API_KEY", "url": "ANTHROPIC_BASE_URL"},
+    "openai-responses": {"provider": "openai", "key": "OPENAI_API_KEY", "url": "OPENAI_BASE_URL",
+                         "api_type": "openai_responses"},
+    "openai-chat": {"provider": "openai", "key": "OPENAI_API_KEY", "url": "OPENAI_BASE_URL",
+                    "api_type": "openai_chatcompletions"},
+    "gemini": {"provider": "google", "key": "GEMINI_API_KEY", "url": "GOOGLE_GEMINI_BASE_URL"},
+}
+
+# The instruction of docker-agent's built-in `default` coding agent, as the CLI ships it. The config this
+# package writes is that agent, with the platform's model in place of its first-available model list.
+INSTRUCTION = """You are an expert software engineer. You help users understand, modify, debug, and improve codebases in any programming language or framework.
+
+<workflow>
+Follow this workflow for every code task:
+
+1. **Understand**: Read the user's request carefully. Use tools to explore the codebase — search for files, read code, check project structure. Prefer tools over assumptions.
+
+2. **Plan**: For non-trivial tasks, think through the approach before writing code. Identify which files need changes, what the dependencies are, and what could break.
+
+3. **Implement**: Make the changes. Write clean, idiomatic code that matches the existing style of the project. Make the minimal set of changes needed.
+
+4. **Validate**: Run the project's linter, type checker, or test suite to verify your changes. If something fails, fix it and re-validate. Do not consider the task done until validation passes.
+
+5. **Summarize**: Briefly describe what you changed and why. Don't write summary files — just respond in the conversation.
+</workflow>
+
+<code_quality>
+- Write clean, self-documenting code. Add comments only when the "why" isn't obvious.
+- Never add comments that restate what the code does.
+- Handle errors properly. Don't swallow errors silently.
+- Follow the language's idiomatic patterns and conventions.
+- Keep functions focused and reasonably sized.
+- Keep files reasonably sized.
+</code_quality>
+
+<communication>
+- Be direct. Skip filler phrases, excessive affirmations, and preamble.
+- When you hit a genuine ambiguity, ask one clear question rather than guessing wrong.
+- For complex tasks, briefly outline your plan before starting.
+</communication>
+
+<tools>
+- Use `shell` to run commands in the user's environment.
+- Use `write_file`, `edit_file`, and `read_file` for file operations.
+</tools>"""
+
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "adaptive")
+
+
+def quote(value):
+    """A YAML scalar that is safe for any text: JSON strings are YAML double-quoted scalars."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def agent_config(request, mcp_labels):
+    """The agent file for this turn: the default coding agent, on the platform's provider and model."""
+    info = APIS[os.environ["HG_PROVIDER_API"]]
+    lines = [
+        "providers:",
+        "  hg:",
+        "    provider: " + info["provider"],
+        "    base_url: " + quote(os.environ["HG_PROVIDER_URL"]),
+        "    token_key: " + info["key"],
+    ]
+    if info.get("api_type"):
+        lines.append("    api_type: " + info["api_type"])
+    lines += [
+        "models:",
+        "  hgmodel:",
+        "    provider: hg",
+        "    model: " + quote(os.environ["HG_MODEL"]),
+    ]
+
+    body = request.body
+    max_tokens = body.get("max_output_tokens")
+    if isinstance(max_tokens, int) and max_tokens > 0:
+        lines.append("    max_tokens: " + str(max_tokens))
+    for field in ("temperature", "top_p"):
+        value = body.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            lines.append(f"    {field}: {value}")
+    effort = request.effort
+    if effort and str(effort).lower() in EFFORTS:
+        lines.append("    thinking_budget: " + quote(str(effort).lower()))
+
+    lines += [
+        "agents:",
+        "  root:",
+        "    model: hgmodel",
+        "    description: " + quote("Docker Agent"),
+        "    instruction: " + quote(INSTRUCTION),
+        "    add_environment_info: true",
+        "    add_prompt_files:",
+        "      - " + quote("AGENTS.md"),
+        "    skills: true",
+        "    toolsets:",
+        "      - type: file",
+        "      - type: shell",
+    ]
+
+    for server in request.mcp_servers:
+        label = server.get("server_label")
+        url = server.get("server_url")
+        if not label or not url:
+            continue
+        lines += [
+            "      - type: mcp",
+            "        name: " + quote(label),
+            "        remote:",
+            "          url: " + quote(url),
+            "          transport_type: " + quote("streamable"),
+        ]
+        headers = server.get("headers")
+        if isinstance(headers, dict) and headers:
+            lines.append("          headers:")
+            for name, value in headers.items():
+                lines.append("            " + quote(name) + ": " + quote(value))
+        allowed = server.get("allowed_tools")
+        if isinstance(allowed, list) and allowed:
+            lines.append("        tools:")
+            for tool in allowed:
+                lines.append("          - " + quote(tool))
+    return "\n".join(lines) + "\n"
+
+
+def environment(info):
+    """The CLI's environment: the platform's, plus what turns its checks, setup and telemetry off."""
+    env = dict(os.environ)
+    env.update({
+        "TELEMETRY_ENABLED": "false",
+        "DOCKER_AGENT_HIDE_TELEMETRY_BANNER": "1",
+        "DOCKER_AGENT_NO_SETUP": "1",
+        "DOCKER_AGENT_AUTO_UPDATE": "0",
+        "DOCKER_AGENT_AUTO_INSTALL": "false",
+        "DOCKER_AGENT_DISABLE_DESKTOP_PROXY": "1",
+        "NO_COLOR": "1",
+        info["url"]: os.environ["HG_PROVIDER_URL"],
+        info["key"]: os.environ["HG_PROVIDER_KEY"],      # a placeholder: the platform's proxy puts the real key in
+    })
+    return env
+
+
+def plus_lines(text):
+    return "".join("+" + line + "\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def minus_plus_lines(old, new):
+    return ("".join("-" + line + "\n" for line in old.splitlines())
+            + "".join("+" + line + "\n" for line in new.splitlines()))[:DIFF_MAX]
+
+
+def exit_code_of(output, failed):
+    """The shell tool folds the exit status into its output; there is no separate field."""
+    match = re.search(r"exit status (\d+)", output)
+    if match:
+        return int(match.group(1))
+    return 1 if failed or output.startswith("Error executing command:") else 0
+
+
+class Translator:
+    """docker-agent's `--json` events in, Responses events out."""
+
+    def __init__(self, emit, mcp_labels):
+        self.emit = emit
+        self.mcp_labels = mcp_labels
+        self.calls = {}                 # tool call id -> the arguments string it was called with
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 0}}
+        self.spoke = False              # whether anything has been shown to the caller
+        self.error = None
+        self.ended = False
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "agent_choice":
+            if event.get("content"):
+                self.spoke = True
+                self.emit.say(event["content"])
+        elif kind == "agent_choice_reasoning":
+            if event.get("content"):
+                self.spoke = True
+                self.emit.think(event["content"])
+        elif kind == "tool_call":
+            call = event.get("tool_call") or {}
+            self.calls[call.get("id")] = ((call.get("function") or {}).get("arguments") or "")
+        elif kind == "tool_call_response":
+            self.result(event)
+        elif kind == "token_usage":
+            self.count(event.get("usage") or {})
+        elif kind == "stream_stopped":
+            self.stop(event)
+        elif kind == "error":
+            self.error = str(event.get("error") or "")
+            self.emit.log("docker-agent: " + self.error)
+        elif kind == "warning":
+            self.emit.log("docker-agent: " + str(event.get("message") or ""))
+        elif kind == "model_fallback":
+            self.emit.log("docker-agent switched from %s to %s: %s" % (
+                event.get("failed_model"), event.get("fallback_model"), event.get("reason")))
+        elif kind in ("hook_started", "hook_finished", "team_info", "toolset_info", "mcp_init_started",
+                      "mcp_init_finished", "user_message", "stream_started", "agent_info", "message_added",
+                      "partial_tool_call", "tool_call_output", "session_title", "session_compaction",
+                      "background_agent_status", "budget_usage", "agent_switching", "agent_choice_reasoning_reset"):
+            pass                        # the CLI's own bookkeeping, nothing the caller needs
+        else:
+            self.emit.log(line)
+
+    def count(self, usage):
+        """A turn's tokens are the sum of each response's own counts; the top-level numbers are session totals."""
+        last = usage.get("last_message") or {}
+        if not isinstance(last, dict):
+            return
+        cached = int(last.get("cached_input_tokens") or 0)
+        self.usage["input_tokens"] += (int(last.get("input_tokens") or 0) + cached
+                                       + int(last.get("cached_write_tokens") or 0))
+        self.usage["output_tokens"] += int(last.get("output_tokens") or 0)
+        self.usage["input_tokens_details"]["cached_tokens"] += cached
+
+    def result(self, event):
+        definition = event.get("tool_definition") or {}
+        name = str(definition.get("name") or "")
+        arguments = self.calls.pop(event.get("tool_call_id"), "")
+        try:
+            given = json.loads(arguments) if arguments else {}
+        except ValueError:
+            given = {}
+        if not isinstance(given, dict):
+            given = {}
+        result = event.get("result") or {}
+        output = result.get("output")
+        if output is None:
+            output = event.get("response") or ""
+        output = str(output)
+        failed = bool(result.get("isError"))
+
+        if name == "shell":
+            command = str(given.get("cmd") or "")
+            code = exit_code_of(output, failed)
+            if code == 0:
+                self.emit.ran(command, stdout=output, exit_code=0)
+            else:
+                self.emit.ran(command, stderr=output, exit_code=code)
+        elif name == "write_file" and not failed:
+            self.emit.wrote(str(given.get("path") or ""), plus_lines(str(given.get("content") or "")))
+        elif name == "edit_file" and not failed:
+            diff = ""
+            for edit in given.get("edits") or []:
+                if isinstance(edit, dict):
+                    diff += minus_plus_lines(str(edit.get("oldText") or ""), str(edit.get("newText") or ""))
+            self.emit.edited(str(given.get("path") or ""), diff[:DIFF_MAX])
+        elif self.mcp_server_of(name):
+            server, tool = self.mcp_server_of(name)
+            self.emit.called(server, tool, given, output=None if failed else output,
+                             error=output if failed else None)
+        else:
+            self.emit.used(name or "tool", arguments or "{}", output)
+        self.spoke = True
+
+    def mcp_server_of(self, name):
+        for label in self.mcp_labels:
+            if name.startswith(label + "_"):
+                return label, name[len(label) + 1:]
+        return None
+
+    def stop(self, event):
+        reason = str(event.get("reason") or "")
+        finish = str(event.get("finish_reason") or "")
+        usage = self.usage if (self.usage["input_tokens"] or self.usage["output_tokens"]) else None
+        self.ended = True
+        if reason in ("", "normal"):
+            if finish == "length":
+                self.emit.incomplete("max_output_tokens", usage)
+            elif finish == "refusal":
+                self.emit.incomplete("content_filter", usage)
+            else:
+                self.emit.done(usage)
+        elif reason == "max_iterations":
+            self.emit.failed("max_iterations",
+                             "Docker Agent stopped after reaching its iteration limit before finishing.", usage)
+        elif reason == "budget_exceeded":
+            self.emit.failed("budget_exceeded",
+                             "Docker Agent stopped after reaching a configured token budget.", usage)
+        elif reason in ("canceled", "cancelled"):
+            self.emit.failed("canceled", "Docker Agent's stream was cancelled before the turn finished.", usage)
+        else:
+            self.emit.failed("cli_error", f"Docker Agent stopped its stream: {reason}.", usage)
+
+
+def state_folder():
+    return os.environ["HG_STATE"]
+
+
+class Cli(hgkit.Cli):
+    """The kit's CLI, and whether the platform has stopped this turn.
+
+    docker-agent answers a stop by cancelling its tool and ending its stream with a `stream_stopped` of its
+    own. A stopped turn prints no terminal line, so once the signal has come, nothing more is translated."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stopped = False
+
+    def _stop(self, *args):
+        self.stopped = True
+        super()._stop(*args)
+
+
+def command(config_path, session, stderr_path):
+    """The CLI, with its standard error written to a file this package can read when it fails."""
+    args = [
+        CLI, "run", "--exec", "--json", "--safety", "autonomous",
+        "--session", session,
+        "--data-dir", os.path.join(os.environ["HG_MIND"], ".cagent"),
+        "--config-dir", os.path.join(os.environ["HG_MIND"], ".cagent", "config"),
+        "--cache-dir", os.path.join(os.environ["HG_MIND"], ".cagent", "cache"),
+        config_path, "-",
+    ]
+    script = "exec " + " ".join(shlex.quote(arg) for arg in args) + " 2>" + shlex.quote(stderr_path)
+    return ["/bin/sh", "-c", script]
+
+
+def stderr_tail(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as file:
+            return file.read()[-ERROR_MAX:]
+    except OSError:
+        return ""
+
+
+def failure_message(code, stderr):
+    detail = ""
+    for line in reversed([line.strip() for line in stderr.splitlines() if line.strip()]):
+        detail = line.removeprefix("Error: ").strip()
+        break
+    if detail:
+        return f"Docker Agent failed (exit code {code}): {detail}"[:2000]
+    return f"Docker Agent exited with code {code} without finishing its stream."
+
+
+def session_is_gone(stderr):
+    text = stderr.lower()
+    return "session" in text and any(phrase in text for phrase in (
+        "not found", "no such", "does not exist", "unknown session", "session db", "database"))
+
+
+def run_once(emit, info, config_path, session, mcp_labels, brief):
+    stderr_path = os.path.join(state_folder(), "stderr.log")
+    with open(stderr_path, "w", encoding="utf-8"):
+        pass
+    translator = Translator(emit, mcp_labels)
+    cli = Cli(command(config_path, session, stderr_path), env=environment(info), stdin=brief)
+    for line in cli.lines():
+        if cli.stopped:                 # the turn is ending: what came so far is its output, no terminal line
+            continue
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli.exit_code, stderr_path
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    hgkit.seed()
+    info = APIS.get(os.environ["HG_PROVIDER_API"])
+    if info is None:
+        emit.failed("provider_api", "Docker Agent has no configuration for the provider API "
+                                    f"{os.environ['HG_PROVIDER_API']!r}.")
+        return
+
+    labels = [s["server_label"] for s in request.mcp_servers
+              if s.get("server_label") and s.get("server_url")]
+    os.makedirs(state_folder(), exist_ok=True)
+    config_path = os.path.join(state_folder(), "agent.yaml")
+    with open(config_path, "w", encoding="utf-8") as file:
+        file.write(agent_config(request, labels))
+    if request.body.get("text") is not None:
+        emit.log("Docker Agent has no option for the request's text.format; the answer is plain text.")
+
+    session = state.get("session")
+    resumed = bool(session)
+    if not session:
+        session = "hg-" + uuid.uuid4().hex
+        state.set("session", session)       # saved before it starts: a stopped turn is resumed by the next
+
+    brief = request.brief()                # handover, instructions, the request's files, then the prompt
+    translator, code, stderr_path = run_once(emit, info, config_path, session, labels, brief)
+    stderr = stderr_tail(stderr_path)
+
+    if not translator.ended and resumed and not translator.spoke and code != 0 and session_is_gone(stderr):
+        emit.log(f"Docker Agent could not resume session {session}; starting a new one")
+        state.clear("session")
+        session = "hg-" + uuid.uuid4().hex
+        state.set("session", session)
+        translator, code, stderr_path = run_once(emit, info, config_path, session, labels, brief)
+        stderr = stderr_tail(stderr_path)
+
+    if not translator.ended:
+        for line in stderr.splitlines():
+            if line.strip():
+                emit.log(line)
+        if translator.error:
+            emit.failed("cli_error", translator.error[:2000])
+        else:
+            emit.failed("cli_exit", failure_message(code, stderr))
+
+    for name in ("agent.yaml", "stderr.log"):       # the mind keeps the session, not this turn's working files
+        try:
+            os.unlink(os.path.join(state_folder(), name))
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,4 @@
+{
+  "model": "builder/goose/deepseek/deepseek-flash",
+  "input": "Say hello in one short sentence."
+}

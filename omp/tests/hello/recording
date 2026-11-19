@@ -1,0 +1,21 @@
+{"type":"session","version":3,"id":"01a1ee61-aab9-70a1-9888-160472d56c13","timestamp":"2026-11-18T11:19:00.537Z","cwd":"/work/.trial/omp/work"}
+{"type":"advisor_cost_changed"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Say hello."}],"attribution":"user","timestamp":1795000740835}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Say hello."}],"attribution":"user","timestamp":1795000740835}}
+{"type":"message_start","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","thinkingSignature":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437"}],"api":"anthropic-messages","provider":"hg","model":"deepseek-flash","usage":{"input":7302,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":7302,"cost":{"input":0.0010953,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.0010953}},"stopReason":"stop","timestamp":1795000740958,"responseId":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437"}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":""}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Hello"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"."}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":" Ready"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":" when"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":" you"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":" are"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"."}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"Hello. Ready when you are."}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","thinkingSignature":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437"},{"type":"text","text":"Hello. Ready when you are."}],"api":"anthropic-messages","provider":"hg","model":"deepseek-flash","usage":{"input":7302,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":7310,"cost":{"input":0.0010953,"output":0.0000048,"cacheRead":0,"cacheWrite":0,"total":0.0011001}},"stopReason":"stop","timestamp":1795000740958,"responseId":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437","duration":1253.510138,"ttft":631.1687300000003,"completedAt":1795000742216}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","thinkingSignature":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437"},{"type":"text","text":"Hello. Ready when you are."}],"api":"anthropic-messages","provider":"hg","model":"deepseek-flash","usage":{"input":7302,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":7310,"cost":{"input":0.0010953,"output":0.0000048,"cacheRead":0,"cacheWrite":0,"total":0.0011001}},"stopReason":"stop","timestamp":1795000740958,"responseId":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437","duration":1253.510138,"ttft":631.1687300000003},"toolResults":[]}
+{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"Say hello."}],"attribution":"user","timestamp":1795000740835},{"role":"assistant","content":[{"type":"thinking","thinking":"","thinkingSignature":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437"},{"type":"text","text":"Hello. Ready when you are."}],"api":"anthropic-messages","provider":"hg","model":"deepseek-flash","usage":{"input":7302,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":7310,"cost":{"input":0.0010953,"output":0.0000048,"cacheRead":0,"cacheWrite":0,"total":0.0011001}},"stopReason":"stop","timestamp":1795000740958,"responseId":"d7934d4c-da0e-4237-a4b5-7d9d30ab5437","duration":1253.510138,"ttft":631.1687300000003}],"isTerminal":true,"yielded":true}

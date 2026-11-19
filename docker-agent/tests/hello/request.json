@@ -1,0 +1,4 @@
+{
+  "model": "builder/docker-agent/deepseek/deepseek-flash",
+  "input": "Say hello."
+}

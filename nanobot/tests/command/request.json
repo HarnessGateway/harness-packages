@@ -1,0 +1,4 @@
+{
+  "model": "builder/nanobot/deepseek/deepseek-flash",
+  "input": "Write hello.py in the current folder that prints hello, then run it with python3 and tell me the output."
+}

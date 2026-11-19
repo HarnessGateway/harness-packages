@@ -1,0 +1,51 @@
+#!/bin/sh
+# Installs OpenSquilla 0.5.8 under $HG_HARNESS/tools, by its makers' documented method:
+# `uv tool install --python 3.12 "<wheel>"` from the GitHub release.
+set -eu
+VERSION=0.5.8
+WHEEL="https://github.com/TokenRhythm/opensquilla/releases/download/v$VERSION/opensquilla-$VERSION-py3-none-any.whl"
+
+for need in python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: OpenSquilla is installed with uv, which needs python3 to bootstrap" >&2
+    exit 1
+  }
+done
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' || {
+  echo "this image's python3 is $(python3 -c 'import platform; print(platform.python_version())'); uv needs 3.9 or later to bootstrap" >&2
+  exit 1
+}
+
+TOOLS="$HG_HARNESS/tools"
+mkdir -p "$TOOLS/bin" "$TOOLS/uv-tools" "$TOOLS/python" "$TOOLS/uv-cache" "$TOOLS/bootstrap"
+
+# uv itself, from PyPI into a throwaway venv that lives with the install. Its pinned version is the one this
+# package was built and tried with.
+python3 -m venv "$TOOLS/bootstrap"
+"$TOOLS/bootstrap/bin/pip" install --quiet --disable-pip-version-check "uv==0.13.9"
+
+UV="$TOOLS/bootstrap/bin/uv"
+# Everything uv downloads or writes stays under $HG_HARNESS/tools; nothing goes to $HOME.
+export UV_TOOL_DIR="$TOOLS/uv-tools"
+export UV_TOOL_BIN_DIR="$TOOLS/bin"
+export UV_PYTHON_INSTALL_DIR="$TOOLS/python"
+export UV_CACHE_DIR="$TOOLS/uv-cache"
+export UV_NO_UPDATE_CHECK=1        # no call to releases.astral.sh, which is not one of the install registries
+# uv's default mirror for python-build-standalone is releases.astral.sh, which is not one of the install
+# registries either. GitHub is; take the same assets from there.
+export UV_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"
+
+# The makers install the "recommended" profile (install.sh, OPENSQUILLA_INSTALL_PROFILE=recommended). That is
+# what their documented command does, and the package keeps it: the same CLI a person gets from install.sh.
+"$UV" tool install --python 3.12 --force --reinstall-package opensquilla \
+  "opensquilla[recommended] @ $WHEEL"
+
+got=$("$TOOLS/bin/opensquilla" version 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | tail -n 1)
+[ "$got" = "$VERSION" ] || {
+  echo "installed OpenSquilla '${got:-nothing}', wanted $VERSION" >&2
+  exit 1
+}
+# Only the tool is needed at run time; the bootstrap uv and its download cache are not.
+rm -rf "$TOOLS/uv-cache" "$TOOLS/bootstrap"
+
+echo "OpenSquilla $got installed"

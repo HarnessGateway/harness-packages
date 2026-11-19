@@ -1,0 +1,27 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "Hey", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ",", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " I", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "'m", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " zer", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "oc", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "law", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " \ud83e\udd80", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " \u2014", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " good", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " to", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " meet", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " you", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ",", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " what", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " are", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " we", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " working", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " on", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " today", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "?", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "text": "Hey, I'm zeroclaw \ud83e\udd80 \u2014 good to meet you, what are we working on today?", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "Hey, I'm zeroclaw \ud83e\udd80 \u2014 good to meet you, what are we working on today?", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Hey, I'm zeroclaw \ud83e\udd80 \u2014 good to meet you, what are we working on today?", "annotations": []}]}}
+{"type": "hg.done"}

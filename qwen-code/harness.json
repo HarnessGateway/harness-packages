@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "qwen-code",
+  "version": "0.28.0-1",
+  "description": "Qwen Code, unmodified.",
+  "mind": ".qwen",
+  "apis": ["anthropic", "openai-chat", "openai-responses", "gemini"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 20 },
+  "cache": [".qwen/tmp"]
+}

@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "goose",
+  "version": "1.60.1-1",
+  "description": "goose, unmodified.",
+  "mind": ".goose",
+  "cache": [".goose/state/logs", ".goose/data/model_catalog"],
+  "apis": ["anthropic", "openai-chat", "gemini"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}

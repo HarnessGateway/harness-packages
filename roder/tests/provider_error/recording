@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"fa8a3fd7-d389-4c62-af78-002a589e0f62"}
+{"type":"turn.started","turn_id":"8340d6d9-f738-4cc4-ac56-2573681ae798"}
+{"type":"item.completed","item":{"id":"8340d6d9-f738-4cc4-ac56-2573681ae798-user","type":"userMessage","text":"Say hello.","status":"completed"}}
+{"type":"turn.failed","error":"{\"message\":\"platform Chat Completions error 400 Bad Request: invalid request, model, or provider configuration\\n\\n--- response body ---\\n{\\\"error\\\":{\\\"message\\\":\\\"The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 0381e2fb-65bd-4a83-abf6-767e87698ab5)\\\",\\\"type\\\":\\\"invalid_request_error\\\",\\\"param\\\":null,\\\"code\\\":\\\"invalid_request_error\\\"}}\"}","usage":{"input_tokens":0,"cached_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}

@@ -1,0 +1,14 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "The", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " program", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " printed", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ":\n\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "```\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "hello", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "```", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "text": "The program printed:\n\n```\nhello\n```", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "The program printed:\n\n```\nhello\n```", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "The program printed:\n\n```\nhello\n```", "annotations": []}]}}
+{"type": "hg.done", "usage": {"input_tokens": 9915, "output_tokens": 9, "input_tokens_details": {"cached_tokens": 9728}}}

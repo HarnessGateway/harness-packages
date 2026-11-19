@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "fast-agent",
+  "version": "0.10.57-1",
+  "description": "fast-agent, unmodified.",
+  "mind": ".fast-agent",
+  "cache": [".fast-agent/processes"],
+  "apis": ["anthropic", "openai-chat", "openai-responses", "gemini"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 20 }
+}

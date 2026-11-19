@@ -1,0 +1,2 @@
+{"type": "hg.log", "text": "fast-agent session is 2611181130-X4Bb7z"}
+{"type": "hg.failed", "code": "provider_error", "message": "Internal error: AsyncMessages.stream() missing 1 required keyword-only argument: 'max_tokens'"}

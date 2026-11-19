@@ -1,0 +1,4 @@
+{
+  "model": "builder/dsh/deepseek/deepseek-flash",
+  "input": "What did the program print?"
+}

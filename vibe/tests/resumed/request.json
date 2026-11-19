@@ -1,0 +1,4 @@
+{
+  "model": "builder/vibe/deepseek/deepseek-flash",
+  "input": "What did the program print? Answer in one short sentence."
+}

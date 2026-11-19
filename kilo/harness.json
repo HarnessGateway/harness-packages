@@ -1,0 +1,21 @@
+{
+  "contract": 1,
+  "name": "kilo",
+  "version": "7.8.27-1",
+  "description": "Kilo Code CLI, unmodified.",
+  "mind": ".local/share/kilo",
+  "cache": [".cache/kilo", ".local/share/kilo/log", ".local/share/kilo/repos", ".local/state"],
+  "apis": ["anthropic", "openai-chat"],
+  "install": { "timeout_s": 1800 },
+  "run": { "stop_grace_s": 20 },
+  "settings": {
+    "MODEL_CONTEXT_TOKENS": {
+      "description": "Context window Kilo declares for the request's model (the provider may have a smaller one)",
+      "default": "200000"
+    },
+    "MODEL_OUTPUT_TOKENS": {
+      "description": "Largest output Kilo declares for the request's model when the request sets no max_output_tokens",
+      "default": "32000"
+    }
+  }
+}

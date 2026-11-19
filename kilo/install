@@ -1,0 +1,21 @@
+#!/bin/sh
+# Installs Kilo Code's CLI at a pinned version under $HG_HARNESS/tools, by its makers' documented method (npm).
+set -eu
+VERSION=7.8.27
+
+for need in node npm; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: the Kilo CLI is distributed as an npm package and needs Node.js and npm" >&2
+    exit 1
+  }
+done
+
+# npm 12 runs no package's install script unless told to, and earlier npm runs every one. Kilo's only script is its
+# postinstall, which puts the native binary for this machine in place, so it runs here by name and no other does.
+npm install --prefix "$HG_HARNESS/tools" --no-audit --no-fund --loglevel=error --ignore-scripts \
+  "@kilocode/cli@$VERSION"
+node "$HG_HARNESS/tools/node_modules/@kilocode/cli/postinstall.mjs"
+
+got=$("$HG_HARNESS/tools/node_modules/.bin/kilo" --version 2>/dev/null | tail -n 1 | awk '{print $1}')
+[ "$got" = "$VERSION" ] || { echo "installed Kilo CLI $got, wanted $VERSION" >&2; exit 1; }
+echo "Kilo CLI $got installed"

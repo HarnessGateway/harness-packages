@@ -1,0 +1,35 @@
+#!/bin/sh
+# Installs fast-agent (the PyPI package fast-agent-mcp) at a pinned version under $HG_HARNESS/tools, into a
+# Python virtual environment of its own, so the shared install is read-only at turn time.
+set -eu
+VERSION=0.10.57
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "this image has no python3: fast-agent needs Python 3.12 to 3.15, and this package's run needs python3" >&2
+  exit 1
+}
+
+python3 -c 'import sys; sys.exit(0 if (3, 12) <= sys.version_info < (3, 16) else 1)' || {
+  echo "this image's python3 is $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])'); fast-agent needs Python 3.12 to 3.15" >&2
+  exit 1
+}
+
+python3 -m venv "$HG_HARNESS/tools/venv" || {
+  echo "could not create a virtual environment: this image's python3 has no venv/ensurepip" >&2
+  exit 1
+}
+
+# Its makers' documented install is `uv tool install fast-agent-mcp` (or uvx); in an image that has only
+# python3, pip into a private environment is the same published wheel and the same entry point.
+"$HG_HARNESS/tools/venv/bin/pip" install --quiet --disable-pip-version-check --no-input --no-cache-dir \
+  "fast-agent-mcp==$VERSION" || {
+  echo "pip could not install fast-agent-mcp $VERSION" >&2
+  exit 1
+}
+
+got=$("$HG_HARNESS/tools/venv/bin/fast-agent" --version 2>/dev/null | awk 'NR==1 {print $NF}')
+[ "$got" = "v$VERSION" ] || {
+  echo "installed fast-agent ${got:-unknown}, wanted v$VERSION" >&2
+  exit 1
+}
+echo "fast-agent $got installed"

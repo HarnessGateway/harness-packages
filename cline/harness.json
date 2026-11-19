@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "cline",
+  "version": "3.0.74-2",
+  "description": "Cline CLI, unmodified.",
+  "mind": ".cline",
+  "apis": ["anthropic", "openai-chat"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 },
+  "cache": [".cline/data/logs", ".cline/data/cache"]
+}

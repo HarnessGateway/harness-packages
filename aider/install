@@ -1,0 +1,75 @@
+#!/bin/sh
+# Installs aider (the aider-chat package) at a pinned version under $HG_HARNESS/tools.
+#
+# aider-chat 0.86.2 supports Python >=3.10,<3.13. When the image already has such an interpreter it is
+# used; otherwise uv fetches a CPython 3.12 into $HG_HARNESS/tools/python. In both cases the CLI itself is
+# installed with pip, which is the method its makers document, into a venv under $HG_HARNESS/tools.
+set -eu
+
+VERSION=0.86.2
+UV_VERSION=0.13.9
+TOOLS="$HG_HARNESS/tools"
+VENV="$TOOLS/venv"
+
+for need in python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: aider needs Python 3.10-3.12, and this install needs python3 to fetch one" >&2
+    exit 1
+  }
+done
+
+mkdir -p "$TOOLS"
+
+suitable() {
+  "$1" -c 'import sys; raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 13) else 1)' 2>/dev/null
+}
+
+PY=
+for candidate in python3.12 python3.11 python3.10 python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && suitable "$candidate"; then
+    PY=$(command -v "$candidate")
+    break
+  fi
+done
+
+make_venv_with_uv() {
+  UV="$TOOLS/uv/bin/uv"
+  if [ ! -x "$UV" ]; then
+    echo "no Python 3.10-3.12 on this image; fetching one with uv $UV_VERSION" >&2
+    python3 -m pip install --quiet --disable-pip-version-check --no-cache-dir \
+      --target "$TOOLS/uv" "uv==$UV_VERSION"
+  fi
+  [ -x "$UV" ] || {
+    echo "could not install uv, which is needed to fetch a Python 3.12 for aider" >&2
+    exit 1
+  }
+  UV_PYTHON_INSTALL_DIR="$TOOLS/python"
+  UV_CACHE_DIR=/tmp/hg-aider-uv
+  UV_LINK_MODE=copy
+  export UV_PYTHON_INSTALL_DIR UV_CACHE_DIR UV_LINK_MODE
+  rm -rf "$VENV"                       # a failed python -m venv may have left a partial one
+  # Download from GitHub's copy of python-build-standalone (in the install registries), not uv's own
+  # releases.astral.sh host, so an environment needs no setup.egress entry for this install.
+  "$UV" python install --no-bin \
+    --mirror https://github.com/astral-sh/python-build-standalone/releases/download 3.12
+  "$UV" venv --python 3.12 --seed "$VENV"
+  PY="$VENV/bin/python"
+}
+
+if [ -n "$PY" ]; then
+  # A venv needs ensurepip; a minimal image may not have it, in which case uv provides the interpreter.
+  if ! "$PY" -m venv --seed "$VENV" >/dev/null 2>&1; then
+    echo "python $("$PY" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))') could not make a venv; using uv" >&2
+    PY=
+  fi
+fi
+[ -n "$PY" ] || make_venv_with_uv
+
+"$PY" -m pip install --quiet --disable-pip-version-check --no-cache-dir "aider-chat==$VERSION"
+
+got=$("$VENV/bin/aider" --version 2>/dev/null | awk '{print $NF}')
+[ "$got" = "$VERSION" ] || {
+  echo "installed aider ${got:-nothing}, wanted $VERSION" >&2
+  exit 1
+}
+echo "aider $got installed"

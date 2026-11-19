@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""One turn of CheetahClaws: start its headless run, and say in Responses events what it does.
+
+CheetahClaws prints one JSON event per line (`cheetahclaws -p --output-format stream-json`): session_start,
+streamed assistant text, each assistant message, each tool call and result, a usage event per model turn, and
+one `result` line with the run's token counts and how it ended. Its standard error is the turn's log.
+"""
+
+import json
+import os
+import re
+import sqlite3
+import sys
+from datetime import datetime
+
+sys.dont_write_bytecode = True                                         # /harness is read-only during a turn
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+CLI = os.path.join(os.environ["HG_HARNESS"], "tools", "venv", "bin", "cheetahclaws")
+DIFF_MAX = 100_000
+OUTPUT_MAX = 8_000
+
+
+# ── the provider ──────────────────────────────────────────────────────────────────────────────────────────
+
+
+def provider_settings():
+    """CheetahClaws is told its provider through its own variables, and a model string naming that provider."""
+    api = os.environ.get("HG_PROVIDER_API", "")
+    url = os.environ.get("HG_PROVIDER_URL", "")
+    key = os.environ.get("HG_PROVIDER_KEY", "")
+    model = os.environ.get("HG_MODEL", "")
+    env = dict(os.environ)
+    if api == "anthropic":
+        env["ANTHROPIC_ENDPOINT"] = url
+        env["ANTHROPIC_API_KEY"] = key            # a placeholder: the platform's proxy puts the real key in
+        return env, "anthropic/" + model
+    if api == "openai-chat":
+        env["CUSTOM_BASE_URL"] = url
+        env["CUSTOM_API_KEY"] = key
+        return env, "custom/" + model
+    return env, model
+
+
+def mcp_label_map(request):
+    """The label CheetahClaws makes of each MCP server name, back to the label the request used."""
+    return {"".join(c if c.isalnum() or c == "_" else "_" for c in str(server.get("server_label") or "")):
+            server.get("server_label")
+            for server in request.mcp_servers if server.get("server_label")}
+
+
+def write_mcp_config(request, emit):
+    """The request's MCP servers, in the file CheetahClaws reads them from (`~/.cheetahclaws/mcp.json`)."""
+    servers = {}
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not label or not url:
+            continue
+        entry = {"type": "http", "url": url}
+        if server.get("headers"):
+            entry["headers"] = server["headers"]
+        servers[label] = entry
+        if server.get("allowed_tools"):
+            emit.log(f"MCP server {label}: allowed_tools is not supported by CheetahClaws; all its tools are offered")
+    folder = os.path.join(os.environ.get("HG_MIND") or os.environ["HOME"], ".cheetahclaws")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "mcp.json")
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump({"mcpServers": servers}, file, indent=2)
+    os.chmod(path, 0o600)
+
+
+def command(model, session):
+    args = [CLI, "-p", "--output-format", "stream-json",
+            "--permission-mode", "accept-all",          # nobody is at the terminal to approve a tool
+            "--model", model]
+    if session:
+        args += ["--resume", session]
+    return args
+
+
+# ── what the CLI did, as a diff ───────────────────────────────────────────────────────────────────────────
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in str(text).splitlines())[:DIFF_MAX]
+
+
+def patch_operations(patch):
+    """A Codex-style ApplyPatch, split into the files it creates, changes and removes."""
+    operations = []
+    lines = str(patch or "").splitlines()
+    index, current = 0, None
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("*** Add File: "):
+            current = ["create_file", line[len("*** Add File: "):].strip(), []]
+            operations.append(current)
+        elif line.startswith("*** Update File: "):
+            current = ["update_file", line[len("*** Update File: "):].strip(), []]
+            operations.append(current)
+        elif line.startswith("*** Delete File: "):
+            operations.append(["delete_file", line[len("*** Delete File: "):].strip(), []])
+            current = None
+        elif line.startswith("*** Move to: "):
+            current = None
+        elif current is not None and (line.startswith("+") or line.startswith("-")):
+            current[2].append(line + "\n")
+        index += 1
+    return [(kind, path, "".join(diff)[:DIFF_MAX]) for kind, path, diff in operations if path]
+
+
+# ── the CLI's lines in, Responses events out ──────────────────────────────────────────────────────────────
+
+
+class Translator:
+    def __init__(self, emit, state, api, base=None, mcp_labels=None):
+        self.emit = emit
+        self.state = state
+        self.api = api
+        self.mcp_labels = mcp_labels or {}
+        self.calls = {}                 # tool call id -> {"name", "input", "message"}: waiting for its result
+        self.assistant_calls = {}       # tool call id -> the transcript entry its input is written into
+        self.streamed = False           # whether the message being read has arrived piece by piece
+        self.pending_text = ""          # that message's text so far, for a stopped turn's saved transcript
+        self.started = False
+        self.ended = False
+        self.result = None
+        self.session_id = None
+        self.model = (base or {}).get("model") or ""
+        self.turns = int((base or {}).get("turn_count") or 0)
+        self.messages = list((base or {}).get("messages") or [])   # this turn continues it; written if stopped
+        self.title = (base or {}).get("title") or ""
+        self.base_input = int((base or {}).get("input_tokens") or 0)
+        self.base_output = int((base or {}).get("output_tokens") or 0)
+        self.errors = []                # (message, category, hint), top-level only
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    # what the turn did, for the turn after a stopped one
+
+    def transcript(self):
+        messages = list(self.messages)
+        if self.streamed and self.pending_text.strip():
+            messages.append({"role": "assistant", "content": self.pending_text, "tool_calls": []})
+        for call in self.calls.values():
+            messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                             "content": "Interrupted: the turn was stopped before this tool call finished.",
+                             "is_error": True})
+        return messages
+
+    def usage_of_run(self):
+        counted = self.result.get("usage") if isinstance(self.result, dict) else None
+        if not isinstance(counted, dict) or not any(counted.get(name) for name in
+                                                     ("input_tokens", "output_tokens",
+                                                      "cache_read_tokens", "cache_write_tokens")):
+            counted = self.usage
+        given = int(counted.get("input_tokens") or 0)
+        cached = int(counted.get("cache_read_tokens") or 0)
+        written = int(counted.get("cache_write_tokens") or 0)
+        # Anthropic reports cache reads and writes beside input_tokens; the Responses usage counts all input.
+        # OpenAI-compatible providers include cached tokens in prompt_tokens already.
+        return {
+            "input_tokens": given + cached + written if self.api == "anthropic" else given,
+            "output_tokens": int(counted.get("output_tokens") or 0),
+            "input_tokens_details": {"cached_tokens": cached},
+        }
+
+    # one line of the CLI's stream
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                 # not JSON: something it printed aside
+        if not isinstance(event, dict) or not event.get("type"):
+            return self.emit.log(line)
+        kind = event.get("type")
+        if event.get("depth"):
+            return                                                     # inside a sub-agent: its parent's call says it
+        if kind == "session_start":
+            self.start(event)
+        elif kind == "user_message":
+            self.messages.append({"role": "user", "content": event.get("text") or ""})
+        elif kind == "assistant_delta":
+            text = event.get("text") or ""
+            if text:
+                self.streamed = True
+                self.pending_text += text
+                self.emit.say(text)
+        elif kind == "assistant_message":
+            self.message(event)
+        elif kind == "tool_call":
+            self.call(event)
+        elif kind == "tool_result":
+            self.result_of_tool(event)
+        elif kind == "usage":
+            for name in self.usage:
+                self.usage[name] += int(event.get(name) or 0)
+        elif kind == "error":
+            self.errors.append(event)
+            self.emit.log(self.error_text(event))
+        elif kind == "result":
+            self.end(event)
+        elif kind == "permission_decision":
+            if event.get("decision") == "deny":
+                self.emit.log(f"CheetahClaws denied {event.get('name', 'a tool')} ({event.get('source', '?')})")
+        elif kind == "notice":
+            self.emit.log(event.get("text") or "")
+        elif kind == "compaction":
+            self.emit.log(f"CheetahClaws compacted its context ({event.get('trigger', 'auto')})")
+        elif kind in ("session_end", "hook"):
+            return
+        else:
+            self.emit.log(json.dumps(event))
+
+    def start(self, event):
+        self.started = True
+        self.model = event.get("model") or self.model
+        session = event.get("session_id")
+        if session:
+            self.session_id = session
+            self.state.set("session", session)                          # the moment it is reported: a stop keeps it
+        if event.get("skipped_untrusted"):
+            names = ", ".join(f"{item.get('kind')}:{item.get('name')}"
+                              for item in event["skipped_untrusted"] if isinstance(item, dict))
+            self.emit.log(f"CheetahClaws skipped untrusted project items: {names}")
+
+    def message(self, event):
+        text = event.get("text") or ""
+        calls = event.get("tool_calls") or []
+        if not self.streamed and text:
+            self.emit.say(text)
+        entries = []
+        for call in calls:
+            entry = {"id": call.get("id", ""), "name": call.get("name", ""), "input": {}}
+            self.assistant_calls[entry["id"]] = entry
+            self.calls[entry["id"]] = {"id": entry["id"], "name": entry["name"], "input": {}}
+            entries.append(entry)
+        if text or entries:
+            self.messages.append({"role": "assistant", "content": text, "tool_calls": entries})
+        self.turns += 1
+        self.streamed = False
+        self.pending_text = ""
+
+    def call(self, event):
+        call_id = event.get("id") or ""
+        name = event.get("name") or ""
+        given = event.get("input") or {}
+        if call_id in self.calls:
+            self.calls[call_id]["name"] = name or self.calls[call_id]["name"]
+            self.calls[call_id]["input"] = given
+        else:
+            self.calls[call_id] = {"id": call_id, "name": name, "input": given}
+        if call_id in self.assistant_calls:
+            self.assistant_calls[call_id]["input"] = given
+
+    def result_of_tool(self, event):
+        call_id = event.get("id") or ""
+        name = event.get("name") or ""
+        output = event.get("output") or ""
+        failed = bool(event.get("is_error"))
+        call = self.calls.pop(call_id, {"id": call_id, "name": name, "input": {}})
+        name = name or call["name"]
+        given = call["input"] or {}
+        self.messages.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": output,
+                              **({"is_error": True} if failed else {})})
+        self.show(name, given, output, failed)
+
+    def show(self, name, given, output, failed):
+        """The most specific item for what the tool did; a failed call still happened, with what it said."""
+        if name == "Bash" and not failed:
+            marker = "\n[stderr]\n"
+            stdout, stderr = (output.split(marker, 1) if marker in output else (output, ""))
+            return self.emit.ran(given.get("command", ""), stdout=stdout, stderr=stderr, exit_code=0)
+        if name == "Bash":
+            return self.emit.ran(given.get("command", ""), stdout=output, exit_code=1)
+        if name == "Write" and not failed:
+            return self.emit.wrote(given.get("file_path", ""), lines_of(given.get("content", ""), "+"))
+        if name == "Edit" and not failed:
+            diff = lines_of(given.get("old_string", ""), "-") + lines_of(given.get("new_string", ""), "+")
+            return self.emit.edited(given.get("file_path", ""), diff)
+        if name == "MultiEdit" and not failed:
+            diff = "".join(lines_of(edit.get("old_string", ""), "-") + lines_of(edit.get("new_string", ""), "+")
+                           for edit in given.get("edits") or [] if isinstance(edit, dict))
+            return self.emit.edited(given.get("file_path", ""), diff[:DIFF_MAX])
+        if name == "ApplyPatch" and not failed:
+            operations = patch_operations(given.get("patch") or given.get("input") or "")
+            if operations:
+                for kind, path, diff in operations:
+                    if kind == "create_file":
+                        self.emit.wrote(path, diff)
+                    elif kind == "update_file":
+                        self.emit.edited(path, diff)
+                    else:
+                        self.emit.deleted(path)
+                return
+        if name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            return self.emit.called(self.mcp_labels.get(server, server), tool, given,
+                                    output=None if failed else output, error=output if failed else None)
+        return self.emit.used(name, json.dumps(given), output)
+
+    def end(self, event):
+        self.result = event
+        self.ended = True
+        usage = self.usage_of_run()
+        reason = event.get("exit_reason") or ""
+        if reason == "completed" and not event.get("is_error"):
+            return self.emit.done(usage)
+        code, message = self.failure(reason, event)
+        self.emit.failed(code, message, usage)
+
+    def error_text(self, event):
+        text = str(event.get("message") or "CheetahClaws reported an error")[:2000]
+        if event.get("hint"):
+            text += f" ({event['hint']})"
+        return text
+
+    def failure(self, reason, event):
+        said = [self.error_text(item) for item in self.errors]
+        if event.get("error"):
+            said.append(str(event["error"])[:2000])
+        denials = [item.get("name") for item in event.get("permission_denials") or [] if isinstance(item, dict)]
+        if denials:
+            said.append("tool calls that needed approval: " + ", ".join(str(name) for name in denials))
+        message = "\n".join(part for part in said if part)
+        codes = {
+            "api_error": "provider_error", "error": "cli_error", "max_turns": "max_turns",
+            "permission_denied": "permission_denied", "quota": "quota",
+            "hook_blocked": "hook_blocked", "hook_stopped": "hook_blocked",
+            "interrupted": "interrupted", "cancelled": "cancelled",
+        }
+        code = codes.get(reason) or (reason if re.fullmatch(r"[a-z0-9_]+", reason or "") else "cli_error")
+        if not message:
+            message = (f"CheetahClaws ended with {reason}" if reason
+                       else "CheetahClaws ended without saying how")
+            if event.get("exit_code") is not None:
+                message += f" (exit code {event['exit_code']})"
+            message += "."
+        return code, message[:2000]
+
+
+# ── what a stopped turn leaves for the next one ───────────────────────────────────────────────────────────
+
+
+def sessions_folder():
+    return os.path.join(os.environ.get("HG_MIND") or os.environ["HOME"], ".cheetahclaws")
+
+
+def load_saved(session):
+    """The session the CLI may resume: its messages and totals, from the store it keeps in the mind."""
+    if not session:
+        return None
+    path = os.path.join(sessions_folder(), "sessions.db")
+    if not os.path.exists(path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        try:
+            row = conn.execute("SELECT messages, title, model, turn_count, input_tokens, output_tokens "
+                               "FROM sessions WHERE id = ?", (session,)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    try:
+        messages = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(messages, list):
+        return None
+    return {"messages": messages, "title": row[1] or "", "model": row[2] or "",
+            "turn_count": row[3] or 0, "input_tokens": row[4] or 0, "output_tokens": row[5] or 0}
+
+
+def save_stopped(translator):
+    """The CLI saves a session only when it reaches its result; a stopped one is saved here, so the next turn
+    resumes the conversation instead of starting over. Best effort: a stop must still end promptly."""
+    session = translator.session_id
+    if not session:
+        return
+    messages = translator.transcript()
+    if not messages:
+        return
+    title = translator.title or next((str(item.get("content") or "") for item in messages
+                                      if item.get("role") == "user"), "")[:200]
+    counts = translator.usage
+    try:
+        folder = sessions_folder()
+        os.makedirs(folder, exist_ok=True)
+        conn = sqlite3.connect(os.path.join(folder, "sessions.db"), timeout=10)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY, title TEXT DEFAULT '', model TEXT DEFAULT '', saved_at TEXT NOT NULL,
+                turn_count INTEGER DEFAULT 0, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                messages TEXT NOT NULL)""")
+            try:
+                conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+                    id, title, content, tokenize='unicode61')""")
+            except sqlite3.Error:
+                pass
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT OR REPLACE INTO sessions "
+                         "(id, title, model, saved_at, turn_count, input_tokens, output_tokens, messages) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (session, title, translator.model, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                          translator.turns,
+                          translator.base_input + int(counts.get("input_tokens") or 0),
+                          translator.base_output + int(counts.get("output_tokens") or 0),
+                          json.dumps(messages, ensure_ascii=False, default=str)))
+            try:
+                conn.execute("DELETE FROM sessions_fts WHERE id = ?", (session,))
+                conn.execute("INSERT INTO sessions_fts (id, title, content) VALUES (?, ?, ?)",
+                             (session, title, " ".join(str(item.get("content") or "")
+                                                       for item in messages)[:50000]))
+            except sqlite3.Error:
+                pass
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+# ── the turn ──────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def turn(emit, state, api, env, model, session, brief, mcp_labels):
+    cli = hgkit.Cli(command(model, session), env=env, stdin=brief)
+    translator = Translator(emit, state, api, load_saved(session), mcp_labels)
+    try:
+        for line in cli.lines():
+            if not translator.ended:
+                translator.read(line)
+    except SystemExit:
+        save_stopped(translator)                                        # stopped: no terminal line, keep the session
+        raise
+    return translator, cli.exit_code
+
+
+def main():
+    env, model = provider_settings()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"                                # /harness is read-only during a turn
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    write_mcp_config(request, emit)
+    try:
+        brief = request.brief()                                         # places the request's files too
+    except Exception as error:
+        return emit.failed("bad_request", f"Could not put the request's files in the work folder: {error}")
+    api = os.environ.get("HG_PROVIDER_API", "")
+    labels = mcp_label_map(request)
+    session = state.get("session")
+    translator, code = turn(emit, state, api, env, model, session, brief, labels)
+    if session and not translator.started and code != 0:
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): start a new one.
+        emit.log(f"CheetahClaws could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code = turn(emit, state, api, env, model, None, brief, labels)
+    if not translator.ended:
+        usage = translator.usage_of_run()
+        emit.failed("cli_exit", f"CheetahClaws exited with code {code} without a result.", usage)
+
+
+if __name__ == "__main__":
+    main()

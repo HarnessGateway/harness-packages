@@ -1,0 +1,14 @@
+{"agent_name":"root","timestamp":"2026-11-18T11:05:52.702426295Z","type":"hook_started","session_id":"hg-4ccc77ea944a42bf90cab64ae57b0884","hook_event":"session_start"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:52.702917027Z","type":"hook_finished","session_id":"hg-4ccc77ea944a42bf90cab64ae57b0884","hook_event":"session_start","duration_ms":0,"allowed":true}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.273309128Z","type":"team_info","available_agents":[{"name":"root","description":"Docker Agent","provider":"anthropic","model":"no-such-model","execution_capabilities":{"mode":"native","tool_execution":"docker-agent","tool_approval":"docker-agent-policy","budget_supported":true,"compaction_supported":true,"mid_turn_steering_supported":true,"prompt_hook_context_supported":true}}],"current_agent":"root"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.273359728Z","type":"mcp_init_started"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.274670686Z","type":"mcp_init_finished"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.27467233Z","type":"toolset_info","available_tools":4,"loading":false}
+{"timestamp":"2026-11-18T11:05:53.274709843Z","type":"user_message","message":"Say hello.","session_id":"hg-4ccc77ea944a42bf90cab64ae57b0884","session_position":0}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.27471264Z","type":"stream_started","session_id":"hg-4ccc77ea944a42bf90cab64ae57b0884"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.274718637Z","type":"mcp_init_started"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.275770507Z","type":"mcp_init_finished"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.275772017Z","type":"toolset_info","available_tools":4,"loading":false}
+{"timestamp":"2026-11-18T11:05:53.275777615Z","type":"agent_info","agent_name":"root","model":"anthropic/no-such-model","description":"Docker Agent"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.275799765Z","type":"hook_started","session_id":"hg-4ccc77ea944a42bf90cab64ae57b0884","hook_event":"turn_start"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:53.275932115Z","type":"hook_finished","session_id":"hg-4ccc77ea944a42bf90cab64ae57b0884","hook_event":"turn_start","duration_ms":0,"allowed":true}

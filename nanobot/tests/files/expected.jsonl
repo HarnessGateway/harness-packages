@@ -1,0 +1,12 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "ctc_0001", "type": "custom_tool_call", "call_id": "call_0001", "name": "read_file", "input": "{\"path\": \"inputs/notes.txt\"}"}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "ctc_0001", "type": "custom_tool_call", "call_id": "call_0001", "name": "read_file", "input": "{\"path\": \"inputs/notes.txt\"}"}}
+{"type": "response.output_item.added", "output_index": 1, "item": {"id": "ctco_0001", "type": "custom_tool_call_output", "call_id": "call_0001", "status": "completed", "output": "1| project codename: nightingale\n2| secret word: plover\n\n(End of file \u2014 2 lines total)"}}
+{"type": "response.output_item.done", "output_index": 1, "item": {"id": "ctco_0001", "type": "custom_tool_call_output", "call_id": "call_0001", "status": "completed", "output": "1| project codename: nightingale\n2| secret word: plover\n\n(End of file \u2014 2 lines total)"}}
+{"type": "response.output_item.added", "output_index": 2, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "delta": "pl", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "delta": "over", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "text": "plover", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0002", "output_index": 2, "content_index": 0, "part": {"type": "output_text", "text": "plover", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 2, "item": {"id": "msg_0002", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "plover", "annotations": []}]}}
+{"type": "hg.done", "usage": {"input_tokens": 11323, "output_tokens": 44, "input_tokens_details": {"cached_tokens": 10880}}}

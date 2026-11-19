@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""One turn of the goose CLI, headless, said in Responses events.
+
+Goose prints one JSON object per line with `--output-format stream-json`: every piece of the assistant's
+message as it arrives (text and thinking), each tool request, each tool response, its own log/progress
+notifications, a final `error` or `complete`, and nothing else on standard output.
+"""
+
+import json
+import os
+import re
+import sqlite3
+import sys
+from urllib.parse import urlsplit
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+GOOSE = os.path.join(os.environ["HG_HARNESS"], "tools", "bin", "goose")
+DIFF_MAX = 100_000
+
+# The Responses effort values goose's own names take.
+EFFORT = {"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "max", "max": "max"}
+
+# Why a resumed session can be refused; then the turn is run again as a new one.
+GONE = re.compile(r"no session found|session .*not found|failed to load session|invalid session", re.IGNORECASE)
+
+
+def provider_settings():
+    """goose's provider, its base URL and key, for the API this turn was given."""
+    api = os.environ.get("HG_PROVIDER_API", "")
+    url, key = os.environ.get("HG_PROVIDER_URL", ""), os.environ.get("HG_PROVIDER_KEY", "")
+    if api == "anthropic":
+        return {"GOOSE_PROVIDER": "anthropic", "ANTHROPIC_HOST": url, "ANTHROPIC_API_KEY": key}
+    if api == "openai-chat":
+        return {"GOOSE_PROVIDER": "openai", "OPENAI_BASE_URL": url, "OPENAI_API_KEY": key}
+    if api == "gemini":
+        return {"GOOSE_PROVIDER": "google", "GOOGLE_HOST": url, "GOOGLE_API_KEY": key}
+    return {}
+
+
+def environment(request):
+    env = dict(os.environ)
+    env.update(provider_settings())
+    env.update({
+        "GOOSE_PATH_ROOT": os.path.join(os.environ["HOME"], ".goose"),  # config, data and state together in the mind
+        "GOOSE_MODEL": os.environ["HG_MODEL"],
+        "GOOSE_MODE": "auto",                    # headless: run tools without asking
+        "GOOSE_DISABLE_KEYRING": "1",            # a keyring is not in the sandbox; the key is the proxy's placeholder
+        "GOOSE_TELEMETRY_OFF": "1",
+    })
+    effort = EFFORT.get((request.effort or "").lower())
+    if effort:
+        env["GOOSE_THINKING_EFFORT"] = effort
+    return env
+
+
+def name_to_key(name):
+    """goose's key for an extension name: letters, digits, '_' and '-', lower case."""
+    return re.sub(r"[^a-z0-9_-]", "_", "".join(c for c in name if not c.isspace())).lower()
+
+
+def extension_key(url):
+    """The extension name goose derives from a streamable HTTP URL, as its CLI flag does."""
+    parsed = urlsplit(url)
+    found = parsed.hostname or ""
+    if parsed.port:
+        found += "_" + str(parsed.port)
+    path = parsed.path.strip("/")
+    if path:
+        found += "_" + path
+    return name_to_key(found)
+
+
+def mcp_servers(request):
+    """The request's MCP servers: goose's flag for each, and the extension key that names its tools."""
+    flags, names = [], {}
+    for server in request.mcp_servers:
+        url = server.get("server_url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
+        flags += ["--with-streamable-http-extension", url]
+        label = server.get("server_label")
+        if isinstance(label, str) and label:
+            names[extension_key(url)] = label
+    return flags, names
+
+
+def session_exists(name):
+    """Whether goose's own store still has this named session. A stopped turn can leave it gone; then the
+    turn is started as a new session instead of asking goose to resume one it does not have."""
+    database = os.path.join(os.environ["HOME"], ".goose", "data", "sessions", "sessions.db")
+    if not os.path.exists(database):
+        return False
+    try:
+        link = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=2)
+        try:
+            return link.execute("SELECT 1 FROM sessions WHERE id = ? OR name = ? LIMIT 1",
+                                (name, name)).fetchone() is not None
+        finally:
+            link.close()
+    except sqlite3.Error:
+        return True                                  # cannot tell here: let goose try the resume
+
+
+def session_name(state):
+    """goose reports no session id, so the session is addressed by a stable name kept in the mind."""
+    current = state.get("session")
+    if current:
+        return current
+    raw = os.environ.get("HG_SESSION") or "default"
+    base = "hgsess-" + (re.sub(r"[^A-Za-z0-9_.-]", "-", raw).strip("-") or "default")[:80]
+    generation = int(state.get("generation") or "0") + 1
+    name = base if generation == 1 else f"{base}-g{generation}"
+    state.set("generation", str(generation))
+    state.set("session", name)
+    return name
+
+
+def command(request, session, resume, mcp_flags):
+    args = [GOOSE, "run", "-i", "-", "-q", "--output-format", "stream-json"]
+    provider = provider_settings().get("GOOSE_PROVIDER")
+    if provider:
+        args += ["--provider", provider]
+    args += ["--model", os.environ["HG_MODEL"]]
+    args += ["--resume", "--name", session] if resume else ["--name", session]
+    if request.instructions:
+        args += ["--system", request.instructions]
+    return args + mcp_flags
+
+
+def text_of(value):
+    """The text of a tool result's content: a string, or MCP content blocks."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        parts = [block.get("text", "") for block in value.get("content") or []
+                 if isinstance(block, dict) and block.get("type") == "text"]
+        return "\n".join(parts)
+    return ""
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+class Translator:
+    """goose's lines in, Responses events out. The terminal line is left to the turn, so a resume can be retried."""
+
+    def __init__(self, emit, state, mcp_names):
+        self.emit = emit
+        self.mcp_names = mcp_names
+        self.calls = {}
+        self.terminal = None                # ("done", usage) or ("failed", code, message)
+        self.produced = False               # whether anything of the agent's work has been printed
+        self.error = ""                     # the last error message goose said
+        self.error_kind = "other"
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "message":
+            self.message(event.get("message") or {})
+        elif kind == "notification":
+            self.notify(event)
+        elif kind == "error":
+            self.fail(str(event.get("error") or "goose reported an error"))
+        elif kind == "complete":
+            self.complete(event)
+        else:
+            self.emit.log(line[:2000])
+
+    def message(self, message):
+        role = message.get("role")
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and role == "assistant":
+                text = block.get("text", "")
+                if text:
+                    self.produced = True
+                    self.emit.say(text)
+            elif kind == "thinking" and role == "assistant":
+                thinking = block.get("thinking", "")
+                if thinking:
+                    self.produced = True
+                    self.emit.think(thinking)
+            elif kind == "toolRequest":
+                self.request(block)
+            elif kind == "toolResponse":
+                self.response(block)
+            elif kind == "error":
+                self.error_kind = block.get("kind") or "other"
+                self.fail(str(block.get("message") or "goose reported an error"))
+            elif kind == "systemNotification":
+                text = block.get("msg")
+                if text:
+                    self.emit.log(str(text)[:2000])
+
+    def notify(self, event):
+        data = event.get("log")
+        if isinstance(data, dict) and data.get("message"):
+            self.emit.log(str(data["message"])[:2000])
+        progress = event.get("progress")
+        if isinstance(progress, dict) and progress.get("message"):
+            self.emit.log(str(progress["message"])[:2000])
+
+    def request(self, block):
+        call = block.get("toolCall") or {}
+        value = call.get("value") or {}
+        if call.get("status") != "success":
+            self.calls[block.get("id")] = (value.get("name") or "", {}, "", str(call.get("error") or ""))
+            return
+        meta = block.get("_meta") or {}
+        self.calls[block.get("id")] = (value.get("name", ""), value.get("arguments") or {},
+                                       meta.get("goose_extension", ""), "")
+
+    def response(self, block):
+        name, given, extension, call_error = self.calls.pop(block.get("id"), ("", {}, "", ""))
+        result = block.get("toolResult") or {}
+        if result.get("status") == "success":
+            value = result.get("value")
+            output, failed = text_of(value), False
+            structured = value.get("structuredContent") if isinstance(value, dict) else None
+            failed = bool(value.get("isError")) if isinstance(value, dict) else False
+        else:
+            value, structured = None, None
+            output, failed = str(result.get("error") or call_error), True
+        if failed and not output:
+            output = call_error or "the tool failed"
+        self.tool(name, given, extension, output, structured, failed)
+
+    def tool(self, name, given, extension, output, structured, failed):
+        if not name:
+            return
+        self.produced = True
+        server = self.mcp_names.get(extension or "")
+        tool = name
+        if server is None and "__" in name:
+            prefix, _, rest = name.partition("__")
+            if prefix in self.mcp_names:
+                server, tool = self.mcp_names[prefix], rest
+        if server is not None:
+            if failed:
+                self.emit.called(server, tool, given, error=output)
+            else:
+                self.emit.called(server, tool, given, output=output or None)
+        elif name == "shell":
+            shell = structured if isinstance(structured, dict) else {}
+            if shell:
+                self.emit.ran(given.get("command", ""), stdout=str(shell.get("stdout", "")),
+                              stderr=str(shell.get("stderr", "")),
+                              exit_code=int(shell.get("exit_code") or (1 if failed else 0)))
+            else:
+                self.emit.ran(given.get("command", ""), stdout="" if failed else output,
+                              stderr=output if failed else "", exit_code=1 if failed else 0)
+        elif name == "write" and not failed:
+            self.emit.wrote(given.get("path", ""), lines_of(given.get("content", ""), "+"))
+        elif name == "edit" and not failed:
+            diff = lines_of(given.get("before", ""), "-") + lines_of(given.get("after", ""), "+")
+            self.emit.edited(given.get("path", ""), diff[:DIFF_MAX])
+        else:
+            self.emit.used(name, json.dumps(given, ensure_ascii=False), output)
+
+    def fail(self, message):
+        self.error = message
+        if self.terminal is None or self.terminal[0] != "done":
+            self.terminal = ("failed", self.code(), message[:2000])
+
+    def code(self):
+        return {"authentication": "authentication", "contextLengthExceeded": "context_length_exceeded",
+                "creditsExhausted": "credits_exhausted", "resourceExhausted": "resource_exhausted"
+                }.get(self.error_kind, "provider_error")
+
+    def complete(self, event):
+        usage = {
+            "input_tokens": int(event.get("input_tokens") or 0),
+            "output_tokens": int(event.get("output_tokens") or 0),
+            "input_tokens_details": {"cached_tokens": int(event.get("cache_read_input_tokens") or 0)},
+        }
+        self.terminal = ("done", usage)
+
+
+def turn(request, emit, state, resume, mcp_flags, mcp_names):
+    hgkit.seed()
+    session = session_name(state)
+    args = command(request, session, resume, mcp_flags)
+    cli = hgkit.Cli(args, env=environment(request), stdin=request.brief(instructions=False))
+    translator = Translator(emit, state, mcp_names)
+    for line in cli.lines():
+        if translator.terminal is None:
+            translator.read(line)
+    return translator, cli.exit_code, session
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    mcp_flags, mcp_names = mcp_servers(request)
+    if any(server.get("headers") for server in request.mcp_servers):
+        emit.log("goose's CLI flag for an MCP server carries its URL only; this request's MCP headers are not used")
+    session = state.get("session")
+    if session and not session_exists(session):
+        emit.log(f"goose's session {session} is no longer in the mind; starting a new one")
+        state.clear("session")
+        session = None
+    resume = bool(session)
+    translator, code, session = turn(request, emit, state, resume, mcp_flags, mcp_names)
+    gone = translator.terminal is None or (translator.terminal[0] == "failed" and GONE.search(translator.error))
+    if resume and not translator.produced and code != 0 and gone:
+        emit.log(f"goose could not resume session {session}; starting a new one")
+        state.clear("session")
+        translator, code, session = turn(request, emit, state, False, mcp_flags, mcp_names)
+    if translator.terminal is None:
+        translator.fail(f"goose exited with code {code} without reporting how the turn ended")
+    kind, *rest = translator.terminal
+    if kind == "done":
+        emit.done(rest[0])
+    else:
+        emit.failed(rest[0], rest[1] or f"goose exited with code {code}")
+
+
+if __name__ == "__main__":
+    main()

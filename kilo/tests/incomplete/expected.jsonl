@@ -1,0 +1,7 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "rs_0001", "type": "reasoning", "summary": []}}
+{"type": "response.reasoning_summary_part.added", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "part": {"type": "summary_text", "text": ""}}
+{"type": "response.reasoning_summary_text.delta", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "delta": "The user wants me to count 1"}
+{"type": "response.reasoning_summary_text.done", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "text": "The user wants me to count 1"}
+{"type": "response.reasoning_summary_part.done", "item_id": "rs_0001", "output_index": 0, "summary_index": 0, "part": {"type": "summary_text", "text": "The user wants me to count 1"}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "rs_0001", "type": "reasoning", "summary": [{"type": "summary_text", "text": "The user wants me to count 1"}]}}
+{"type": "hg.incomplete", "reason": "max_output_tokens", "usage": {"input_tokens": 15513, "output_tokens": 8, "input_tokens_details": {"cached_tokens": 15232}}}

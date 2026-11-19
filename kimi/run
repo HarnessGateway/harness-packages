@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""One turn of Kimi Code CLI (Moonshot AI's `kimi`), in its non-interactive print mode.
+
+`kimi -p "<prompt>" --output-format stream-json` prints one JSON object per line: a version line, each
+finished assistant step (text and tool calls), each tool result, and a last line naming the session.  This
+translates those into Responses events, writes the provider and MCP settings the CLI reads from
+`$KIMI_CODE_HOME`, and reports the turn's token usage from the session wire log the CLI keeps under it.
+"""
+
+import ctypes
+import contextlib
+import glob
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+KIMI = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "kimi")
+DIFF_MAX = 100_000
+DEFAULT_CONTEXT = 131_072
+TOOL_TIMEOUT_EXIT = 124
+
+FILE_WRITTEN = re.compile(r"^(?:Wrote|Appended) \d+ bytes to ")
+FILE_EDITED = re.compile(r"^Replaced \d+ occurrences? in ")
+BASH_FAILED = re.compile(r"Command failed with exit code: (\d+)\.\s*$")
+ERROR_LINE = re.compile(r"(?i)(error|provider\.[a-z_]+)")
+
+
+# ── what the CLI reads: provider, model, MCP servers ──────────────────────────────────────────────────────
+
+
+def kimi_home():
+    """The CLI's data root: the mind's `.kimi-code`, which is what the manifest names as its session folder."""
+    return os.path.join(os.environ["HOME"], ".kimi-code")
+
+
+def toml(value):
+    return json.dumps(str(value))          # a JSON string is a TOML basic string
+
+
+def provider_type(api):
+    return {
+        "anthropic": "anthropic",
+        "openai-chat": "openai",
+        "openai-responses": "openai_responses",
+    }.get(api, "openai")
+
+
+def write_config(request):
+    """Write the provider and model the turn was given into the config the CLI reads.
+
+    The key stays out of the file: `api_key_env` makes the CLI read the placeholder from its environment.
+    """
+    api = os.environ["HG_PROVIDER_API"]
+    kind = provider_type(api)
+    lines = [
+        'default_model = "harness"',
+        "telemetry = false",
+        "",
+        "[providers.harness]",
+        f"type = {toml(kind)}",
+        f"base_url = {toml(os.environ['HG_PROVIDER_URL'])}",
+        'api_key_env = "HG_PROVIDER_KEY"',
+        "",
+        "[models.harness]",
+        'provider = "harness"',
+        f"model = {toml(os.environ['HG_MODEL'])}",
+        f"max_context_size = {DEFAULT_CONTEXT}",
+    ]
+    max_out = request.body.get("max_output_tokens")
+    if kind == "anthropic" and isinstance(max_out, int) and max_out > 0:
+        lines.append(f"max_output_size = {max_out}")
+    effort = request.effort
+    if effort in ("low", "medium", "high", "xhigh", "max"):
+        lines += [
+            'capabilities = ["thinking"]',
+            'support_efforts = ["low", "medium", "high", "xhigh", "max"]',
+            f"default_effort = {toml(effort)}",
+            "",
+            "[thinking]",
+            "enabled = true",
+            f"effort = {toml(effort)}",
+        ]
+    folder = kimi_home()
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "config.toml"), "w", encoding="utf-8") as file:
+        file.write("\n".join(lines) + "\n")
+
+
+def write_mcp(request):
+    """Write the request's MCP servers to the CLI's user-level mcp.json.
+
+    The file mirrors this turn's request: a server the request no longer names is removed, so a turn does not
+    keep trying to reach one from an earlier turn.  The caller names its servers on every request.
+    """
+    servers = {}
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not label or not url:
+            continue
+        entry = {"url": url}
+        if isinstance(server.get("headers"), dict) and server["headers"]:
+            entry["headers"] = server["headers"]
+        if isinstance(server.get("allowed_tools"), list) and server["allowed_tools"]:
+            entry["enabledTools"] = server["allowed_tools"]
+        servers[label] = entry
+    folder = kimi_home()
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "mcp.json"), "w", encoding="utf-8") as file:
+        json.dump({"mcpServers": servers}, file, indent=2)
+        file.write("\n")
+
+
+# ── the CLI as a process ──────────────────────────────────────────────────────────────────────────────────
+
+
+_PR_SET_CHILD_SUBREAPER = 36
+
+
+def _keep_what_the_cli_starts():
+    with contextlib.suppress(OSError, AttributeError):
+        ctypes.CDLL(None).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+
+
+def _started_by_run():
+    """The processes below this one that are still running, read from /proc."""
+    parents = {}
+    with contextlib.suppress(OSError):
+        for entry in filter(str.isdigit, os.listdir("/proc")):
+            with contextlib.suppress(OSError), open(f"/proc/{entry}/stat", encoding="utf-8") as file:
+                state, parent = file.read().rpartition(")")[2].split()[:2]
+                if state != "Z":
+                    parents[int(entry)] = int(parent)
+    found = []
+    above = {os.getpid()}
+    while above:
+        above = {pid for pid, parent in parents.items() if parent in above}
+        found.extend(above)
+    return found
+
+
+class Kimi:
+    """Runs `kimi`, yields its standard output a line at a time, and keeps the end of its standard error.
+
+    A stop sent to `run` is passed to the CLI and to every process it started; when they have ended,
+    `run` ends there with no terminal line.  Under `HG_REPLAY` the CLI is not started and the recording's
+    lines are yielded instead.
+    """
+
+    def __init__(self, command, env):
+        self._command = list(command)
+        self._env = dict(env)
+        self._process = None
+        self._stopped = False
+        self._tail = ""
+        self.exit_code = None
+
+    def _stop(self, *_signal):
+        self._stopped = True
+        assert self._process is not None
+        started = _started_by_run()
+        with contextlib.suppress(ProcessLookupError):
+            if started:
+                for pid in started:
+                    os.kill(pid, signal.SIGTERM)
+            elif self._process.poll() is None:
+                os.killpg(self._process.pid, signal.SIGTERM)
+
+    def _drain(self):
+        assert self._process is not None and self._process.stderr is not None
+        for line in self._process.stderr:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+            self._tail = (self._tail + line)[-16_384:]
+
+    def stderr_text(self):
+        return self._tail
+
+    def lines(self):
+        recording = self._env.get("HG_REPLAY")
+        if recording:
+            with open(recording, encoding="utf-8") as file:
+                for line in file:
+                    yield line.rstrip("\n")
+            self.exit_code = 0
+            return
+        _keep_what_the_cli_starts()
+        self._process = subprocess.Popen(  # noqa: S603
+            self._command, env=self._env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+        reader = threading.Thread(target=self._drain, daemon=True)
+        reader.start()
+        handled = threading.current_thread() is threading.main_thread()
+        before = signal.signal(signal.SIGTERM, self._stop) if handled else None
+        record_to = self._env.get("HGKIT_RECORD")
+        record = open(record_to, "a", encoding="utf-8") if record_to else None  # noqa: SIM115 - closed below
+        try:
+            assert self._process.stdout is not None
+            for line in self._process.stdout:
+                if record is not None:
+                    record.write(line)
+                    record.flush()
+                yield line.rstrip("\n")
+        finally:
+            if record is not None:
+                record.close()
+        self.exit_code = self._process.wait()
+        reader.join(timeout=5)
+        if handled:
+            signal.signal(signal.SIGTERM, before)
+        if self._stopped:
+            while _started_by_run():
+                time.sleep(0.1)
+            raise SystemExit(0)
+
+
+# ── the CLI's lines, translated ───────────────────────────────────────────────────────────────────────────
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in str(text).splitlines())[:DIFF_MAX]
+
+
+class Translator:
+    """Kimi's stream-json lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}                 # tool_call id -> (name, arguments)
+        self.ended = False              # the CLI named the session: the turn finished
+        self.error = ""                 # a top-level error line, if the CLI printed one
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        role = event.get("role")
+        if role == "assistant":
+            self.assistant(event)
+        elif role == "tool":
+            self.result(event)
+        elif role == "meta":
+            self.meta(event)
+        elif event.get("type") == "error":
+            self.error = str(event.get("message") or event.get("code") or "Kimi Code reported an error")
+            self.emit.log(self.error)
+        else:
+            self.emit.log(line)
+
+    def assistant(self, event):
+        content = event.get("content")
+        if isinstance(content, str) and content:
+            self.emit.say(content)
+        for call in event.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            raw = function.get("arguments")
+            try:
+                arguments = json.loads(raw) if isinstance(raw, str) and raw else {}
+            except ValueError:
+                arguments = {"_raw": raw}
+            if not isinstance(arguments, dict):
+                arguments = {"_value": arguments}
+            self.calls[call.get("id")] = (name, arguments)
+
+    def result(self, event):
+        content = event.get("content")
+        text = content if isinstance(content, str) else json.dumps(content)
+        call = self.calls.pop(event.get("tool_call_id"), None)
+        if call is None:
+            return self.emit.used("tool", "", text)
+        name, arguments = call
+        if name == "Bash":
+            output, code = text, 0
+            failed = BASH_FAILED.search(output)
+            if failed:
+                code, output = int(failed.group(1)), output[:failed.start()]
+            elif "Command killed by timeout" in output:
+                code = TOOL_TIMEOUT_EXIT
+            elif "Interrupted by user" in output:
+                code = 130
+            elif output.strip() == "Command executed successfully.":
+                output = ""
+            self.emit.ran(str(arguments.get("command", "")), stdout=output, exit_code=code)
+        elif name == "Write" and FILE_WRITTEN.match(text):
+            self.emit.wrote(str(arguments.get("path", "")), lines_of(arguments.get("content", ""), "+"))
+        elif name == "Edit" and FILE_EDITED.match(text):
+            diff = lines_of(arguments.get("old_string", ""), "-") + \
+                lines_of(arguments.get("new_string", ""), "+")
+            self.emit.edited(str(arguments.get("path", "")), diff[:DIFF_MAX])
+        elif name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            self.emit.called(server, tool, arguments, output=text)
+        else:
+            self.emit.used(name, json.dumps(arguments), text)
+
+    def meta(self, event):
+        kind = event.get("type")
+        if kind == "session.resume_hint":
+            session = event.get("session_id")
+            if session:
+                self.state.set("session", str(session))
+            self.ended = True
+        elif kind == "turn.step.retrying":
+            self.emit.log("Kimi Code is retrying: " + str(event.get("error_message") or event.get("error_name") or ""))
+        elif kind != "system.version":
+            self.emit.log(json.dumps(event))
+
+
+# ── token usage ───────────────────────────────────────────────────────────────────────────────────────────
+
+
+def wire_snapshot():
+    """The size of every session wire log before the turn, so only what this turn added is counted."""
+    found = {}
+    for path in glob.glob(os.path.join(kimi_home(), "sessions", "**", "wire.jsonl"), recursive=True):
+        with contextlib.suppress(OSError):
+            found[path] = os.path.getsize(path)
+    return found
+
+
+def turn_usage(before):
+    """The sum of this turn's `usage.record` lines, from every agent's wire log."""
+    total = {"inputOther": 0, "output": 0, "inputCacheRead": 0, "inputCacheCreation": 0}
+    found = False
+    for path in glob.glob(os.path.join(kimi_home(), "sessions", "**", "wire.jsonl"), recursive=True):
+        start = before.get(path, 0)
+        try:
+            size = os.path.getsize(path)
+            if size <= start:
+                continue
+            with open(path, "rb") as file:
+                file.seek(start)
+                data = file.read()
+        except OSError:
+            continue
+        for line in data.decode("utf-8", "replace").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict) or record.get("type") != "usage.record":
+                continue
+            if record.get("usageScope", "session") != "turn":
+                continue
+            usage = record.get("usage") or {}
+            for key in total:
+                value = usage.get(key)
+                if isinstance(value, (int, float)):
+                    total[key] += int(value)
+                    found = True
+    if not found:
+        return None
+    return {
+        "input_tokens": total["inputOther"] + total["inputCacheRead"] + total["inputCacheCreation"],
+        "output_tokens": total["output"],
+        "input_tokens_details": {"cached_tokens": total["inputCacheRead"]},
+    }
+
+
+# ── one turn ─────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def environment():
+    env = dict(os.environ)
+    env.update({
+        "KIMI_CODE_HOME": kimi_home(),
+        "KIMI_CODE_NO_AUTO_UPDATE": "1",
+        "KIMI_DISABLE_TELEMETRY": "1",
+        "KIMI_CODE_TRUST_WORKSPACE": "1",
+    })
+    return env
+
+
+def command(prompt, session=None, fresh=False):
+    args = [KIMI, "--output-format", "stream-json", "-p", prompt]
+    if session:
+        args += ["--session", session]
+    elif not fresh:
+        # Continue whatever session this mind already holds for the working directory. On a fresh mind the
+        # CLI says there is nothing to continue and starts a new session.
+        args += ["--continue"]
+    return args
+
+
+def run_turn(emit, state, prompt, session, fresh):
+    cli = Kimi(command(prompt, session, fresh), env=environment())
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli
+
+
+def failure_message(cli, translator):
+    if translator.error:
+        return translator.error[:2000]
+    lines = [line.strip() for line in cli.stderr_text().splitlines() if line.strip()]
+    said = next((line for line in reversed(lines) if ERROR_LINE.search(line)), "")
+    if not said and lines:
+        said = lines[-1]
+    said = re.sub(r"^error:\s*", "", said)
+    said = re.sub(r"^failed to run prompt:\s*", "", said)
+    return said[:2000] or f"Kimi Code exited with code {cli.exit_code} without finishing the turn."
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    os.makedirs(kimi_home(), exist_ok=True)
+    write_config(request)
+    write_mcp(request)
+    before = {} if os.environ.get("HG_REPLAY") else wire_snapshot()
+    prompt = request.brief()
+    session = state.get("session")
+
+    translator, cli = run_turn(emit, state, prompt, session, fresh=False)
+    said = cli.stderr_text()
+    if not translator.ended and session and (
+            f'Session "{session}" not found' in said or "was created under a different directory" in said):
+        emit.log(f"Kimi Code could not resume session {session}; starting a new one")
+        state.clear("session")
+        translator, cli = run_turn(emit, state, prompt, None, fresh=True)
+
+    usage = None if os.environ.get("HG_REPLAY") else turn_usage(before)
+    if not translator.ended:
+        if os.environ.get("HG_REPLAY"):
+            emit.failed("cli_exit", "Kimi Code ended without reporting a session; the turn did not finish.")
+        else:
+            message = failure_message(cli, translator)
+            code = "provider_error" if re.search(r"provider\.[a-z_]+", message) else "cli_exit"
+            emit.failed(code, message, usage)
+        return
+    emit.done(usage)
+
+
+if __name__ == "__main__":
+    main()

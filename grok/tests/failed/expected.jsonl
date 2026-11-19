@@ -1,0 +1,1 @@
+{"type": "hg.failed", "code": "provider_error", "message": "API error (status 400 Bad Request): invalid_request_error: The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 78d39b50-aa07-4dc8-a423-23d6cb1e04ff)"}

@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "jcode",
+  "version": "1.0.0-1",
+  "description": "J-Code, unmodified.",
+  "mind": ".jcode",
+  "cache": [".jcode/cache", ".jcode/logs"],
+  "apis": ["anthropic", "openai-chat", "openai-responses", "gemini"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}

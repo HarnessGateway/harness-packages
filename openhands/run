@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""One turn of OpenHands (the Software Agent SDK): run its headless driver and translate what it reports.
+
+The SDK is a library and ships no command-line program, so this package supplies a small driver that
+builds the SDK's own default CLI agent and prints one JSON line per event. The driver is started as a
+subprocess, through `hgkit.Cli`, so a stopped turn stops it (and the shells its tools started) and so the
+platform's checker can replay a recording in its place.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+PYTHON = os.path.join(os.environ["HG_HARNESS"], "tools", "venv", "bin", "python")
+DRIVER = os.path.join(os.environ["HG_HARNESS"], "driver", "openhands_turn.py")
+
+
+def environment():
+    """The SDK needs no rewrite of the platform's variables; it reads the turn's provider directly."""
+    env = dict(os.environ)
+    env.update({
+        "OPENHANDS_SUPPRESS_BANNER": "1",          # its banner belongs in the log, not on the protocol
+        "LOG_LEVEL": "WARNING",
+        "PYTHONDONTWRITEBYTECODE": "1",            # /harness/tools is read-only during a turn
+        "LITELLM_LOCAL_MODEL_COST_MAP": "True",    # never fetch LiteLLM's cost map from GitHub
+        "LITELLM_LOG": "ERROR",
+        "XDG_CACHE_HOME": "/tmp/hg-openhands-cache",
+    })
+    return env
+
+
+def turn(request, emit, state, session):
+    """Run the driver once. Returns whether it printed a terminal line."""
+    command = [PYTHON, DRIVER]
+    if session:
+        command += ["--session", session]
+    cli = hgkit.Cli(command, env=environment(), stdin=request.brief())
+
+    usage, terminal = None, None
+    for line in cli.lines():
+        try:
+            event = json.loads(line)
+            kind = event["type"]
+        except (ValueError, KeyError, TypeError):
+            emit.log(f"the OpenHands driver printed a line that is not one of its events: {line[:500]}")
+            continue
+
+        if kind == "session":
+            if event.get("id"):
+                if event["id"] != state.get("session"):
+                    state.set("session", event["id"])
+                if not event.get("resumed"):
+                    emit.log(f"OpenHands session {event['id']}")
+        elif kind == "log":
+            emit.log(event.get("text", ""))
+        elif kind == "think":
+            emit.think(event.get("text", ""))
+        elif kind == "say":
+            emit.say(event.get("text", ""))
+        elif kind == "ran":
+            emit.ran(event.get("command", ""), stdout=event.get("stdout", ""),
+                     stderr=event.get("stderr", ""), exit_code=int(event.get("exit_code", 0)))
+        elif kind == "wrote":
+            emit.wrote(event.get("path", ""), event.get("diff", ""))
+        elif kind == "edited":
+            emit.edited(event.get("path", ""), event.get("diff", ""))
+        elif kind == "deleted":
+            emit.deleted(event.get("path", ""))
+        elif kind == "used":
+            emit.used(event.get("name", "tool"), event.get("input", ""), event.get("output", ""))
+        elif kind == "called":
+            emit.called(event.get("server", ""), event.get("tool", ""), event.get("arguments"),
+                        output=event.get("output"), error=event.get("error"))
+        elif kind in ("done", "failed"):
+            usage = event.get("usage") or usage
+            terminal = event
+        else:
+            emit.log(f"the OpenHands driver printed an unknown event {kind!r}")
+
+    if terminal is None:
+        return False, cli.exit_code
+    if terminal["type"] == "done":
+        emit.done(usage)
+    else:
+        emit.failed(terminal.get("code") or "cli_error",
+                    terminal.get("message") or "OpenHands failed without a message", usage)
+    return True, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    hgkit.seed()
+    session = state.get("session")
+    try:
+        ended, code = turn(request, emit, state, session)
+    except FileNotFoundError:
+        emit.failed("cli_missing", "The OpenHands SDK is not installed in this harness: run its install again.")
+        return
+    except Exception as exc:                                  # noqa: BLE001 - never end without a terminal line
+        emit.failed("cli_error", f"The OpenHands driver could not run: {exc}"[:2000])
+        return
+    if not ended:
+        emit.failed("cli_exit",
+                    f"The OpenHands driver exited with code {code} without finishing the turn; "
+                    "the turn's log has its standard error.")
+
+
+if __name__ == "__main__":
+    main()

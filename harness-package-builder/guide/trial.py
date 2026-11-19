@@ -14,9 +14,11 @@
 
 `install` and `turn` stand in for /harness, /mind, /work and /turn with folders under $HG_WORK/.trial/<name>/.
 They stay between turns of this session, so a second `turn` continues the first: that is how resuming is tried.
+As on the platform, the stand-in for /harness takes writes during `install` and none during a `turn`.
 
 Every command is run through a proxy on this machine that notes the hosts it asks for and passes each request
-on to the sandbox's own proxy. What that proxy refuses is marked: those are the hosts the package must declare.
+on to the sandbox's own proxy. What that proxy refuses is marked: those are hosts an environment must allow,
+for the package's README. After a turn it says what the mind holds, largest first.
 
 Standard library only.
 """
@@ -155,23 +157,39 @@ def _splice(source, target):
 
 
 def observed(command, env, cwd=None, stdout=None, stop_after=None, grace=10):
-    """Run a command through the observer. Its exit code; the hosts it asked for are printed afterwards."""
+    """Run a command through the observer; the hosts it asked for are printed afterwards. Its exit code, and how
+    it ended: "by itself", "stopped" (it ended within the grace of being stopped) or "killed" (it did not)."""
     observer = Observer(env)
     process = subprocess.Popen(command, env={**env, **dict.fromkeys(PROXIES, observer.url)}, cwd=cwd, stdout=stdout,
                                stdin=subprocess.DEVNULL)
+    ended = "by itself"
     try:
         code = process.wait(timeout=stop_after)
     except subprocess.TimeoutExpired:
         print(f"stopping it after {stop_after:g} seconds", file=sys.stderr)
         process.send_signal(signal.SIGTERM)
         try:
-            code = process.wait(timeout=grace)
+            code, ended = process.wait(timeout=grace), "stopped"
         except subprocess.TimeoutExpired:
             print(f"it did not end within {grace} seconds of being stopped, and was killed", file=sys.stderr)
             process.kill()
-            code = process.wait(timeout=KILL_AFTER_S)
+            code, ended = process.wait(timeout=KILL_AFTER_S), "killed"
     observer.report()
-    return code
+    return code, ended
+
+
+def _megabytes(count):
+    return f"{count / 1e6:.1f} MB"
+
+
+def _held(folder):
+    """The bytes of files under a folder, for each folder two levels down: {".agent/cache": 2900000, ...}."""
+    sizes = {}
+    for path in folder.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            key = "/".join(path.relative_to(folder).parts[:2])
+            sizes[key] = sizes.get(key, 0) + path.stat().st_size
+    return sizes
 
 
 # ── a package, laid out as the platform lays it out ────────────────────────────────────────────────────────
@@ -218,14 +236,24 @@ class Trial:
             "HG_HARNESS_VERSION": str(self.manifest.get("version", "")),
         }
 
+    def _harness_is_writable(self, writable):
+        """/harness takes writes during an install and none during a turn. Here that is its files' modes, which
+        hold for the sandbox's user as a read-only mount does (not for root, who writes anywhere)."""
+        for path in (self.harness, *self.harness.rglob("*")):
+            if not path.is_symlink():
+                mode = path.stat().st_mode
+                path.chmod(mode | 0o200 if writable else mode & ~0o222)
+
     def install(self):
+        if self.harness.exists():
+            self._harness_is_writable(True)
         shutil.rmtree(self.harness, ignore_errors=True)
         self._lay_out()
         home = Path("/tmp/home")                             # where the platform puts an install's HOME
         home.mkdir(parents=True, exist_ok=True)
         limit = (self.manifest.get("install") or {}).get("timeout_s", 900)
-        code = observed([str(self.harness / "install")], {**self._common(), "HOME": str(home)}, cwd=self.harness,
-                        stop_after=limit, grace=KILL_AFTER_S)
+        code, _ = observed([str(self.harness / "install")], {**self._common(), "HOME": str(home)}, cwd=self.harness,
+                           stop_after=limit, grace=KILL_AFTER_S)
         print(f"install exited with code {code}")
         if code == 0:
             (self.root / "installed").write_text(self._install_digest())
@@ -236,7 +264,9 @@ class Trial:
         if not marker.exists() or marker.read_text() != self._install_digest():
             sys.exit(f"run `trial.py install {args.folder}` first: "
                      "this package's install has not been run as it is now")
+        self._harness_is_writable(True)
         self._lay_out()
+        self._harness_is_writable(False)                     # as on the platform: a turn only reads its install
         if args.fresh:
             for folder in (self.mind, self.work):
                 shutil.rmtree(folder, ignore_errors=True)
@@ -273,10 +303,13 @@ class Trial:
 
         grace = (self.manifest.get("run") or {}).get("stop_grace_s", 10)
         with printed.open("w") as out:
-            code = observed([str(self.harness / "run")], env, cwd=self.work, stdout=out,
-                            stop_after=args.stop_after, grace=grace)
+            code, ended = observed([str(self.harness / "run")], env, cwd=self.work, stdout=out,
+                                   stop_after=args.stop_after, grace=grace)
         print(f"run exited with code {code}")
-        ok = self._read(printed, recording, env.get("HG_PROVIDER_KEY", "")) and code == 0
+        ok = self._read(printed, recording, env.get("HG_PROVIDER_KEY", ""), ended) and (code == 0 or ended == "stopped")
+        if needs_provider and ended == "by itself":
+            self._say_whether_tokens_were_counted(printed)
+        self._say_what_the_mind_holds()
         if args.case:
             case = self.folder / "tests" / args.case
             case.mkdir(parents=True, exist_ok=True)
@@ -296,7 +329,30 @@ class Trial:
         return "/".join((env["HG_ENVIRONMENT"] or "default", self.name, provider or "none", model or "none"))
 
     @staticmethod
-    def _read(printed, recording, placeholder):
+    def _say_whether_tokens_were_counted(printed):
+        """The platform shows the tokens of every turn, and has only what the terminal line says."""
+        lines = [line for line in printed.read_text().splitlines() if line]
+        try:
+            last = json.loads(lines[-1]) if lines else {}
+            kind, usage = last.get("type"), last.get("usage")
+        except (ValueError, AttributeError):
+            return                                          # not a line the platform reads: said above
+        if kind in ("hg.done", "hg.incomplete") and not (isinstance(usage, dict) and usage.get("input_tokens")):
+            print("NOTE: the terminal line carries no token usage: the platform will show no tokens for this turn. "
+                  "Find where the CLI makes its counts known (guide/events.md, \"Token usage\"), or say in the "
+                  "README everything you looked at")
+
+    def _say_what_the_mind_holds(self):
+        """The mind is saved after every turn and counts toward the disk limit: show what is in it, largest first."""
+        sizes = sorted(_held(self.mind).items(), key=lambda held: -held[1])
+        largest = ", ".join(f"{name} {_megabytes(size)}" for name, size in sizes[:5] if size >= 100_000)
+        print(f"the mind holds {_megabytes(sum(size for _, size in sizes))}" + (f": {largest}" if largest else ""))
+        if any(size >= 20_000_000 for _, size in sizes):
+            print("  what the CLI makes again by itself (a download cache, unpacked libraries, a catalogue) is turned "
+                  "off, or named in the manifest's `cache` so that it is not saved")
+
+    @staticmethod
+    def _read(printed, recording, placeholder, ended):
         """Say what `run` printed, and what is plainly wrong with it. The platform's checker says the rest."""
         ok, kinds, last = True, [], None
         lines = [line for line in printed.read_text().splitlines() if line]
@@ -310,9 +366,20 @@ class Trial:
                 continue
             if last == "response.output_item.done":
                 kinds.append(line.get("item", {}).get("type"))
-        ended = [number for number, text in enumerate(lines, 1) if any(f'"{kind}"' in text for kind in TERMINAL)]
+        terminal = [number for number, text in enumerate(lines, 1) if any(f'"{kind}"' in text for kind in TERMINAL)]
         print(f"printed {len(lines)} lines to {printed}; items: {', '.join(map(str, kinds)) or 'none'}")
-        if last not in TERMINAL or len(ended) != 1:
+        if ended != "by itself":
+            # The turn was stopped: `run` stops its CLI and ends, printing nothing more (the kit's Cli does this).
+            if ended == "killed":
+                print("WRONG: run did not end within its grace (run.stop_grace_s) and was killed: whatever its CLI "
+                      "was writing is cut off there")
+                ok = False
+            if terminal:
+                print("WRONG: a stopped turn prints no terminal line: what was printed until then is its output")
+                ok = False
+            if ok:
+                print("stopped: run ended and printed no terminal line, as a stopped turn does")
+        elif last not in TERMINAL or len(terminal) != 1:
             print("WRONG: exactly one terminal line (hg.done, hg.incomplete, hg.failed) must be printed, last")
             ok = False
         else:
@@ -350,7 +417,7 @@ def main(argv=None):
         command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
         if not command:
             parser.error("observe -- <command>")
-        return observed(command, env)
+        return observed(command, env)[0]
     if args.command == "turn" and not (args.prompt or args.request):
         parser.error("turn needs a prompt, or --request FILE")
     if args.command == "turn" and any("=" not in pair for pair in args.set):

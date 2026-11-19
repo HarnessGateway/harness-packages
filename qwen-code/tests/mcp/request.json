@@ -1,0 +1,23 @@
+{
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Use the mock echo tool exactly once with the text hi, then tell me exactly what it returned."
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "mcp",
+      "server_label": "mock",
+      "server_url": "http://127.0.0.1:18775/mcp",
+      "allowed_tools": [
+        "echo"
+      ]
+    }
+  ]
+}

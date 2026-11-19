@@ -1,0 +1,31 @@
+#!/bin/sh
+# Installs the Cline CLI at a pinned version under $HG_HARNESS/tools, by its makers' documented method (npm).
+#
+# `cline` is a small npm package that resolves a platform-specific Bun-compiled binary through optional
+# dependencies. npm - and the wrapper it installs - pick the build for this machine; this script names no
+# architecture. The package's postinstall only hard-links that binary for faster startup, so it is not run:
+# the wrapper finds the binary by walking node_modules either way.
+set -eu
+VERSION=3.0.74
+
+for need in node npm python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: Cline CLI needs Node.js 22 or later, and this package's run needs python3" >&2
+    exit 1
+  }
+done
+
+npm install --prefix "$HG_HARNESS/tools" --no-audit --no-fund --loglevel=error --ignore-scripts \
+  "cline@$VERSION"
+
+CLINE="$HG_HARNESS/tools/node_modules/.bin/cline"
+[ -x "$CLINE" ] || { echo "npm installed cline but $CLINE is not executable" >&2; exit 1; }
+
+# No update check and no telemetry while we ask it its version.
+got=$(CLINE_NO_AUTO_UPDATE=1 DISABLE_TELEMETRY=1 OTEL_TELEMETRY_ENABLED=0 \
+  "$CLINE" --version 2>/dev/null | awk 'NF {print $1; exit}')
+[ "$got" = "$VERSION" ] || {
+  echo "installed Cline CLI ${got:-nothing}, wanted $VERSION (is the Node.js on this image able to run the wrapper?)" >&2
+  exit 1
+}
+echo "Cline CLI $got installed"

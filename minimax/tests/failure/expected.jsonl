@@ -1,0 +1,1 @@
+{"type": "hg.failed", "code": "provider_error", "message": "BYOK provider custom_provider:harnessgateway upstream error: 400 The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: f903dc0c-ac52-44dc-9696-fbe3e12e6e42)"}

@@ -10,6 +10,7 @@ Everything the platform asks of a harness package, and everything it gives one. 
   install          executable: puts the pinned CLI under $HG_HARNESS/tools. Runs once per environment image.
   run              executable: one turn
   seeds/mind/      optional: files copied into the session's mind on first use
+  seeds/work/      optional: the same, into the work folder, for a CLI that reads its instructions only from there
   README.md        what it is, what it needs, what it maps
   tests/<case>/    recorded turns: request.json, recording, expected.jsonl
 ```
@@ -31,8 +32,8 @@ is packed.
   "description": "One sentence: what it is.",
   "mind": ".mycli",
   "apis": ["anthropic", "openai-chat"],
-  "install": { "egress": ["downloads.example.com"], "timeout_s": 900 },
-  "run": { "egress": ["api.example.com"], "stop_grace_s": 10 },
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 10 },
   "settings": {
     "EFFORT": { "description": "Reasoning effort when the request names none", "default": "medium" }
   },
@@ -49,10 +50,9 @@ is packed.
 | `version` | yes | `<CLI version>-<package revision>`: `1.4.2-1`. The CLI's version is the one `install` pins. |
 | `description` | no | Up to 4,000 characters |
 | `mind` | no | The CLI's own folder under `$HOME` (`.mycli`). Another harness that takes over the session is pointed at it. Leave it out for a CLI that keeps no session. |
-| `apis` | yes | The provider APIs the CLI speaks, the one it speaks best first: `anthropic` (Anthropic Messages), `openai-responses`, `openai-chat` (Chat Completions). `[]` for a harness that needs no model. |
-| `install.egress` | no | Hosts the install needs beyond the registries below |
+| `cache` | no | Up to 16 folders under `$HOME` that are not saved with the session (`[".mycli/cache"]`): only what the CLI makes again by itself when it is missing. Look at what the trial left in the mind: anything large that is not the session belongs here, or is turned off. |
+| `apis` | yes | The provider APIs the CLI speaks, the one it speaks best first: `anthropic` (Anthropic Messages), `openai-responses`, `openai-chat` (Chat Completions), `gemini` (the Gemini API). `[]` for a harness that needs no model. |
 | `install.timeout_s` | no | 1 to 3600, default 900 |
-| `run.egress` | no | Hosts every turn needs beyond its provider |
 | `run.stop_grace_s` | no | 1 to 300, default 10: how long a stopped turn has to end by itself |
 | `settings` | no | Up to 64 values the organization may set, not secret. Each: `description`, optional `default`, optional `required`. A turn gets each as a variable. |
 | `secrets` | no | Up to 64 secret values the organization may set. Each: `description`, `hosts` (at least one), optional `required`. A turn gets each as a variable holding a placeholder. |
@@ -78,7 +78,7 @@ when it has one), in a container of that image, as user 10000, with the root rea
 | Working directory | The package, laid out with the kit: `$HG_HARNESS`, writable for this run only |
 | `HOME` | `/tmp/home` |
 | Variables | `HG_CONTRACT`, `HG_HARNESS`, `HG_HARNESS_NAME`, `HG_HARNESS_VERSION`, and the proxy and certificate variables |
-| Network | The registries below, plus `install.egress`. No provider, no secrets. |
+| Network | The registries below, plus what the environment's setup names (`setup.egress`). No provider, no secrets. |
 | Time limit | `install.timeout_s` |
 
 It must:
@@ -113,9 +113,13 @@ An install can always reach the package managers, whatever its environment's net
 | Mirrors, fonts, schemas, the Model Context Protocol | `sourceforge.net`, `*.sourceforge.net`, `packagecloud.io`, `*.packagecloud.io`, `fonts.googleapis.com`, `fonts.gstatic.com`, `json-schema.org`, `www.json-schema.org`, `json.schemastore.org`, `www.schemastore.org`, `*.modelcontextprotocol.io` |
 
 A turn reaches them too in an environment whose network is `limited` and allows package managers, which is
-the default. Do not count on it for something every turn needs: declare that host in `run.egress`. In an
-environment whose network is `closed` a turn reaches its provider and nothing else, not even what
-`run.egress` declares.
+the default. In an environment whose network is `closed` a turn reaches its provider and nothing else.
+
+**A package names no host.** The environment constrains the agent: a turn reaches its provider and what its
+environment allows, an install reaches these registries and what its environment's setup names, and nothing
+in a package adds to either. So the package's README lists every other host the CLI asks for, and says for
+each whether the CLI needs it or works without it. Whoever sets up an environment reads that list and allows
+what they choose: `network.allow` for turns, `setup.egress` for the install.
 
 **A CLI that cannot be installed this way.** Some CLIs keep their dependencies with the home they run under,
 or update themselves in place; one read-only install shared by every session does not suit them. When the
@@ -131,8 +135,12 @@ Called as `$HG_HARNESS/run`, with no arguments, in the work folder, once per tur
 inputs, starts its CLI headless, prints events as the CLI works, prints one terminal line, and exits 0.
 Standard error is free text: it is kept as the turn's log (its last 64 KiB) and never shown to the caller.
 
-When a turn is stopped, `run` is sent a termination signal. It stops its CLI and exits; after
-`run.stop_grace_s` it is killed. What was printed until then is the turn's output.
+When a turn is stopped, `run` is sent a termination signal. It stops its CLI and exits, printing no terminal
+line and starting nothing else; after `run.stop_grace_s` it is killed. What was printed until then is the
+turn's output. `hgkit.Cli` does this by itself: it passes the signal to the CLI and to every process the CLI
+started (a daemon a CLI starts for itself is otherwise killed with the sandbox, part-way through its work),
+and when they have ended, `run` ends there. A CLI that needs longer than ten seconds to end cleanly says so
+with `run.stop_grace_s`.
 
 ### What a turn is given
 
@@ -187,7 +195,7 @@ sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
 import hgkit
 
 request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
-hgkit.seed_mind()                                    # seeds/mind into $HOME; what is there is left alone
+hgkit.seed()                                         # seeds/mind into $HOME; what is there is left alone
 cli = hgkit.Cli([...], env=..., stdin=request.brief())
 for line in cli.lines():                             # the CLI's standard output, a line at a time
     ...                                              # emit.say, emit.think, emit.ran, emit.wrote, …
@@ -198,8 +206,9 @@ emit.done(usage)
 |---|---|
 | `hgkit.Request` | The turn's inputs. `/harness/guide/request.md` |
 | `hgkit.State` | `state.get(name)`, `state.set(name, value)`, `state.clear(name)`: small named values under `$HG_STATE` |
-| `hgkit.seed_mind` | Copies `seeds/mind` into the mind, never over a file that is there |
-| `hgkit.Cli` | Runs the CLI; `lines()` gives its standard output; stops it when the turn is stopped (`stopped` is then true); `exit_code` when it has ended. Under a check it replays a recording in the CLI's place. |
+| `hgkit.outbound` | The variables a process needs to reach out of the sandbox (the proxy, its certificate authority), as a dict. For a process the CLI starts with its own environment, such as a stdio MCP server: put them in its configuration every turn. |
+| `hgkit.seed` | Copies `seeds/mind` into the mind and `seeds/work` into the work folder, never over a file that is there |
+| `hgkit.Cli` | Runs the CLI; `lines()` gives its standard output; when the turn is stopped it stops the CLI, and all the CLI started, and ends `run`; `exit_code` when the CLI ended by itself. Under a check it replays a recording in the CLI's place. |
 | `hgkit.Emitter` | Prints lines the platform accepts. `/harness/guide/events.md` |
 
 Give `hgkit.Cli` the CLI's whole environment (`dict(os.environ)` plus what the CLI needs). The CLI's standard
@@ -226,8 +235,8 @@ Never read another harness's files or formats yourself. The agent may; the packa
 A secret's value never enters the sandbox. The variable holds a placeholder (`hgs_` and 32 hex characters,
 new every turn). The proxy replaces it wherever it appears in a header or a URL's query, in requests to the
 hosts the secret is bound to, and nowhere else. So put the variable's value exactly where the CLI would put
-the real token, and bind the secret to that host in the manifest. A secret's hosts are reachable without
-being in `run.egress`.
+the real token, and bind the secret to that host in the manifest. Binding says where the value may go; the
+environment must still allow that host, so it is in the README's list too.
 
 The provider's key works the same way: `HG_PROVIDER_KEY`, toward the provider's host.
 

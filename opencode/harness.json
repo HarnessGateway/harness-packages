@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "opencode",
+  "version": "1.19.6-2",
+  "description": "OpenCode, unmodified.",
+  "mind": ".local/share/opencode",
+  "cache": [".cache/opencode", ".local/state/opencode", ".local/share/opencode/log", ".npm"],
+  "apis": ["anthropic", "openai-chat"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 10 }
+}

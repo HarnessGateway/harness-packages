@@ -1,0 +1,79 @@
+#!/bin/sh
+# Installs ZeroClaw at a pinned version under $HG_HARNESS/tools, from the makers' own release archive.
+#
+# ZeroClaw publishes one pre-built archive per target triple; the makers' install.sh detects this machine's
+# triple the same way and verifies the archive against the release's SHA256SUMS. Nothing is built here.
+set -eu
+
+VERSION=0.9.0
+
+for need in curl tar sha256sum; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: installing ZeroClaw needs curl, tar and sha256sum" >&2
+    exit 1
+  }
+done
+
+case "$(uname -s)" in
+  Linux) ;;
+  *)
+    echo "this package installs ZeroClaw's Linux release; this image is $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+# The target triple of the makers' release asset for this machine.
+arch=$(uname -m)
+case "$arch" in
+  x86_64 | amd64)
+    if (ldd --version 2>&1 || true) | grep -qi musl || grep -qiE '^ID=alpine' /etc/os-release 2>/dev/null; then
+      triple=x86_64-unknown-linux-musl
+    else
+      triple=x86_64-unknown-linux-gnu
+    fi
+    ;;
+  aarch64 | arm64)
+    if (ldd --version 2>&1 || true) | grep -qi musl || grep -qiE '^ID=alpine' /etc/os-release 2>/dev/null; then
+      triple=aarch64-unknown-linux-musl
+    else
+      triple=aarch64-unknown-linux-gnu
+    fi
+    ;;
+  armv7l) triple=armv7-unknown-linux-gnueabihf ;;
+  armv6l | arm*) triple=arm-unknown-linux-gnueabihf ;;
+  *)
+    echo "ZeroClaw $VERSION publishes no Linux release for this machine ($arch)" >&2
+    exit 1
+    ;;
+esac
+
+base="https://github.com/zeroclaw-labs/zeroclaw/releases/download/v$VERSION"
+NAME="zeroclaw-$triple.tar.gz"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+echo "fetching ZeroClaw $VERSION for $triple"
+curl -fsSL --retry 3 --connect-timeout 20 "$base/SHA256SUMS" -o "$work/SHA256SUMS"
+curl -fsSL --retry 3 --connect-timeout 20 "$base/$NAME" -o "$work/$NAME"
+
+expected=$(awk -v name="$NAME" '$2 == name { print $1 }' "$work/SHA256SUMS")
+[ -n "$expected" ] || {
+  echo "the release publishes no zeroclaw-$triple.tar.gz: no pre-built ZeroClaw for this machine" >&2
+  exit 1
+}
+actual=$(sha256sum "$work/$NAME" | awk '{ print $1 }')
+[ "$actual" = "$expected" ] || {
+  echo "the ZeroClaw archive is corrupt: expected $expected, got $actual" >&2
+  exit 1
+}
+
+mkdir -p "$HG_HARNESS/tools/bin"
+tar -xzf "$work/$NAME" -C "$work" zeroclaw
+install -m 755 "$work/zeroclaw" "$HG_HARNESS/tools/bin/zeroclaw"
+
+got=$("$HG_HARNESS/tools/bin/zeroclaw" --version | awk '{ print $2 }')
+[ "$got" = "$VERSION" ] || {
+  echo "installed ZeroClaw $got, wanted $VERSION" >&2
+  exit 1
+}
+echo "ZeroClaw $got installed"

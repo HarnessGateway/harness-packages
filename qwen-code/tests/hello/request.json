@@ -1,0 +1,4 @@
+{
+  "model": "builder/qwen-code/deepseek/deepseek-flash",
+  "input": "Say hello."
+}

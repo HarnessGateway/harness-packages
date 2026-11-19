@@ -1,0 +1,59 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "The", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " program", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " printed", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ":\n\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "```\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "hello", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "```\n\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "Just", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " that", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " single", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " line", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ",", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " with", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " a", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " trailing", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " new", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "line", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ".\n\n", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "(", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "Note", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ":", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " it", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " printed", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " lowercase", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " `", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "hello", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "`", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " \u2014", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " not", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " `", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "hello", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ",", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " world", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "`", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " or", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " with", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " any", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " punctuation", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " \u2014", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " because", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " that", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "'s", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " exactly", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " the", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " string", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " in", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " the", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " `", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "print", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "()`", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": " call", "logprobs": []}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": ".)", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "text": "The program printed:\n\n```\nhello\n```\n\nJust that single line, with a trailing newline.\n\n(Note: it printed lowercase `hello` \u2014 not `hello, world` or with any punctuation \u2014 because that's exactly the string in the `print()` call.)", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "The program printed:\n\n```\nhello\n```\n\nJust that single line, with a trailing newline.\n\n(Note: it printed lowercase `hello` \u2014 not `hello, world` or with any punctuation \u2014 because that's exactly the string in the `print()` call.)", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "The program printed:\n\n```\nhello\n```\n\nJust that single line, with a trailing newline.\n\n(Note: it printed lowercase `hello` \u2014 not `hello, world` or with any punctuation \u2014 because that's exactly the string in the `print()` call.)", "annotations": []}]}}
+{"type": "hg.done", "usage": {"input_tokens": 3260, "output_tokens": 53, "input_tokens_details": {"cached_tokens": 3072}}}

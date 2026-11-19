@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""One turn of aider (aider-chat): start it headless with `--message`, and say in Responses events what it does.
+
+aider has no machine-readable stream. It prints a banner, then the model's reasoning and answer (its own
+"THINKING"/"ANSWER" markers), then a token report, then one line per file it applied, and the output of any
+shell command the model suggested and the user (here, the harness) allowed.
+"""
+
+import glob
+import json
+import os
+import re
+import shutil
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+AIDER = os.path.join(os.environ["HG_HARNESS"], "tools", "venv", "bin", "aider")
+DIFF_MAX = 100_000
+MAX_FILES = 200
+MAX_FILE_BYTES = 200_000
+MAX_TOTAL_BYTES = 2_000_000
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+MAX_IMAGE_BYTES = 5_000_000
+MAX_IMAGE_TOTAL = 8_000_000
+
+REASONING_START = "--------------"
+ANSWER_START = "------------"
+THINKING = "► **THINKING**"
+ANSWER = "► **ANSWER**"
+
+BANNER = (
+    "Analytics have been permanently disabled.",
+    "Aider v",
+    "Model: ",
+    "Git repo: ",
+    "Repo-map: ",
+    "Restored previous conversation history.",
+    "Warning: ",
+    "Note: ",
+    "Loaded ",
+    "Using ",
+    "Version: ",
+)
+ERROR_STARTS = ("litellm.", "anthropic.", "openai.", "httpx.", "httpcore.", "aiohttp.", "requests.")
+ERROR_CONTAINS = (
+    "Traceback (most recent call last):",
+    "Exception while updating files:",
+    "Empty response received from LLM",
+    "Unable to write file ",
+    "has hit a token limit!",
+)
+NOT_FATAL = ("The LLM did not conform to the edit format.", "Retrying in ")
+PROMPT = re.compile(r"\(Y\)es/\(N\)o|\[Yes\]:|\[No\]:")   # aider echoes its confirmation prompt on stdout
+
+
+def prime_model_cache():
+    """aider keeps the model price table in $HOME/.aider/caches and fetches it from GitHub when missing.
+    That folder is not saved with the session, so put litellm's own bundled copy there instead: no turn
+    needs to reach raw.githubusercontent.com."""
+    folder = os.path.join(os.environ["HG_MIND"], ".aider", "caches")
+    target = os.path.join(folder, "model_prices_and_context_window.json")
+    if os.path.exists(target):
+        return
+    bundled = glob.glob(os.path.join(os.environ["HG_HARNESS"], "tools", "venv", "lib", "python*",
+                                     "site-packages", "litellm", "model_prices_and_context_window*.json"))
+    if not bundled:
+        return
+    source = next((path for path in bundled if path.endswith("_backup.json")), bundled[0])
+    try:
+        os.makedirs(folder, exist_ok=True)
+        shutil.copyfile(source, target)
+    except OSError:
+        pass
+
+
+def provider_settings():
+    """aider speaks through litellm: the model string's prefix picks the API, and its env names the endpoint."""
+    env = dict(os.environ)
+    env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"      # use litellm's bundled price map: no GitHub fetch
+    api = os.environ.get("HG_PROVIDER_API", "")
+    url = os.environ.get("HG_PROVIDER_URL", "")
+    key = os.environ.get("HG_PROVIDER_KEY", "")
+    if api == "anthropic":
+        env["ANTHROPIC_API_BASE"] = url
+        env["ANTHROPIC_API_KEY"] = key
+        prefix = "anthropic"
+    elif api == "gemini":
+        env["GEMINI_API_BASE"] = url
+        env["GEMINI_API_KEY"] = key
+        prefix = "gemini"
+    else:                                              # openai-chat, and anything else the platform names
+        env["OPENAI_API_BASE"] = url
+        env["OPENAI_API_KEY"] = key
+        prefix = "openai"
+    return env, prefix
+
+
+def chat_file(path):
+    """("text"|"image", size) for something aider can put in its chat, or None."""
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return None
+        size = os.path.getsize(path)
+        if size == 0:
+            return None
+        if path.lower().endswith(IMAGE_SUFFIXES):          # aider sends these to the model as images
+            return ("image", size) if size <= MAX_IMAGE_BYTES else None
+        if size > MAX_FILE_BYTES:
+            return None
+        with open(path, "rb") as file:
+            return ("text", size) if b"\x00" not in file.read(8192) else None
+    except OSError:
+        return None
+
+
+def mentioned(prompt, work):
+    """Paths the caller named that exist in the work folder, so aider can see and edit them."""
+    found = []
+    for word in re.split(r"\s+", prompt or ""):
+        word = word.strip("`'\"()[]{}<>,.;:!*")
+        if not word or word.startswith("-") or ".." in word.split("/"):
+            continue
+        if os.path.isabs(word):
+            continue
+        if os.path.isfile(os.path.join(work, word)):
+            found.append(os.path.normpath(word))
+    return found
+
+
+def work_files(request, state):
+    """The files to put in aider's chat: what the request mentions, what earlier turns touched when the folder
+    is too large to send whole, and — for an ordinary small folder — every text file in it, like `aider .`."""
+    work = os.environ["HG_WORK"]
+    named = mentioned(request.prompt, work)
+    touched = []
+    saved = state.get("files")
+    if saved:
+        try:
+            touched = [name for name in json.loads(saved) if os.path.isfile(os.path.join(work, name))]
+        except ValueError:
+            touched = []
+
+    every = []
+    text_total = image_total = 0
+    full = False
+    for root, dirs, names in os.walk(work):
+        dirs[:] = sorted(d for d in dirs if d != ".git" and not d.startswith(".") and d not in
+                         {"__pycache__", "node_modules", ".venv", "venv", ".mypy_cache", ".pytest_cache"})
+        for name in sorted(names):
+            if name.startswith("."):
+                continue
+            path = os.path.join(root, name)
+            found = chat_file(path)
+            if found is None:
+                continue
+            kind, size = found
+            too_much = (text_total + size > MAX_TOTAL_BYTES if kind == "text"
+                        else image_total + size > MAX_IMAGE_TOTAL)
+            if len(every) >= MAX_FILES or too_much:
+                full = True
+                break
+            every.append(os.path.relpath(path, work))
+            if kind == "text":
+                text_total += size
+            else:
+                image_total += size
+        if full:
+            break
+
+    if len(every) <= 50:
+        chosen = list(every)
+    else:
+        chosen = list(named) + list(touched) + list(every)
+    seen = set()
+    files = []
+    for name in chosen:
+        if name not in seen:
+            seen.add(name)
+            files.append(name)
+    return files[:MAX_FILES]
+
+
+def command(request, prefix, files, restore):
+    model = os.environ.get("HG_MODEL", "")
+    chat = os.path.join(os.environ["HG_MIND"], ".aider", "chat.history.md")
+    inputs = os.path.join(os.environ["HG_MIND"], ".aider", "input.history")
+    os.makedirs(os.path.dirname(chat), exist_ok=True)
+    args = [
+        AIDER,
+        "--model", f"{prefix}/{model}",
+        "--weak-model", f"{prefix}/{model}",      # summarization and commit messages must use this model too
+        "--editor-model", f"{prefix}/{model}",
+        "--edit-format", "diff",                  # search/replace keeps edits small and lets aider hear commands
+        "--no-pretty",
+        "--no-auto-commits",
+        "--no-git",                               # the platform owns the folder: aider never commits or rewrites it
+        "--no-gitignore",
+        "--no-check-update",
+        "--analytics-disable",
+        "--no-show-model-warnings",
+        "--no-show-release-notes",
+        "--disable-playwright",
+        "--map-tokens", "0",                      # no repo map: the files in the chat are the context
+        "--chat-history-file", chat,
+        "--input-history-file", inputs,
+        "--message", request.brief(),
+    ]
+    if request.effort:
+        args += ["--reasoning-effort", request.effort]
+    args += ["--restore-chat-history" if restore else "--no-restore-chat-history"]
+    args += files
+    return args
+
+
+def number(text):
+    text = text.strip().replace(",", "")
+    try:
+        if text.endswith("k"):
+            return int(round(float(text[:-1]) * 1000))
+        if text.endswith("m"):
+            return int(round(float(text[:-1]) * 1_000_000))
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def parse_tokens(line):
+    """`Tokens: 2.5k sent, 2.3k cache hit, 169 received.` -> (input, cached, output)."""
+    rest = line.split("Tokens:", 1)[1].strip()
+    rest = rest.split("Cost:", 1)[0].strip().rstrip(".")
+    sent = cached = received = 0
+    for part in rest.split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        count = number(bits[0])
+        label = " ".join(bits[1:]).lower()
+        if label.startswith("sent"):
+            sent = count
+        elif label.startswith("cache hit"):
+            cached = count
+        elif label.startswith("received"):
+            received = count
+    return sent, cached, received
+
+
+FENCE = re.compile(r"^(`{3,})(?:[A-Za-z0-9_+.-]+)?\s*$")
+
+
+def search_replace(text):
+    """The SEARCH and REPLACE parts of aider's diff-format block, or None."""
+    lines = text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == "<<<<<<< SEARCH")
+    except StopIteration:
+        return None
+    middle = next((i for i in range(start + 1, len(lines)) if lines[i].strip() == "======="), None)
+    if middle is None:
+        return None
+    end = next((i for i in range(middle + 1, len(lines)) if lines[i].strip() == ">>>>>>> REPLACE"), len(lines))
+    original = "\n".join(lines[start + 1:middle]).strip("\n")
+    updated = "\n".join(lines[middle + 1:end]).strip("\n")
+    return original, updated
+
+
+def parse_blocks(answer):
+    """Aider's answer lists `path`, a fenced block, then the edit. Only diff-format blocks are used; each
+    becomes what the platform needs: whether the file was created, and the lines removed and added."""
+    blocks = {}
+    lines = answer.splitlines()
+    for i in range(len(lines) - 1):
+        fence = FENCE.match(lines[i + 1].strip())
+        if not fence or not lines[i].strip() or lines[i].lstrip().startswith("```"):
+            continue
+        path = lines[i].strip().strip("*`_").rstrip(":").lstrip("#").strip()
+        if not path or " " in path:
+            continue
+        close = fence.group(1)
+        j = i + 2
+        body = []
+        while j < len(lines) and lines[j].strip() != close:
+            body.append(lines[j])
+            j += 1
+        parsed = search_replace("\n".join(body))
+        if parsed:
+            original, updated = parsed
+            entry = blocks.setdefault(path, {"original": [], "updated": [], "create": True})
+            entry["original"].extend(original.splitlines())
+            entry["updated"].extend(updated.splitlines())
+            if original.strip():
+                entry["create"] = False
+    for entry in blocks.values():
+        diff = ["-" + line for line in entry["original"]] + ["+" + line for line in entry["updated"]]
+        entry["diff"] = ("\n".join(diff) + "\n")[:DIFF_MAX] if diff else ""
+    return blocks
+
+
+class Translator:
+    """aider's lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.mode = "prelude"
+        self.skip_blank = False
+        self.answer = []
+        self.blocks = {}
+        self.blocks_ready = False
+        self.pending = None            # (command, [output lines]) while aider runs a suggested command
+        self.errors = []
+        self.error_mode = False
+        self.exhausted = False
+        self.sent = self.cached = self.received = 0
+        self.saw_usage = False
+        self.saw_content = False
+        self.ran_any = False
+        self.applied = []
+        self.ended = False
+
+    # -- what came in --------------------------------------------------------------------------------------
+
+    def read(self, line):
+        if self.pending is not None and not self.boundary(line):
+            self.pending[1].append(line)
+            return
+        if self.pending is not None:
+            self.flush_command()
+
+        if PROMPT.search(line):
+            return                                        # a confirmation prompt, answered "yes" by EOF
+        if line in (REASONING_START, ANSWER_START):
+            return                                    # the rule above aider's THINKING/ANSWER marker
+        if line.strip() == THINKING:
+            if self.mode == "post":                   # another model exchange (a reflected edit)
+                self.answer = []
+                self.blocks_ready = False
+            self.mode = "thinking"
+            self.skip_blank = True
+            return
+        if line.strip() == ANSWER:
+            if self.mode == "post":
+                self.answer = []
+                self.blocks_ready = False
+            self.mode = "answer"
+            self.skip_blank = True
+            return
+        if line:
+            self.skip_blank = False
+
+        if line.startswith("Tokens: "):
+            sent, cached, received = parse_tokens(line)
+            self.sent += sent
+            self.cached += cached
+            self.received += received
+            self.saw_usage = True
+            self.mode = "post"
+            return
+        if line.startswith("Cost: "):
+            return
+
+        if line.startswith("Applied edit to "):
+            self.applied_file(line[len("Applied edit to "):].strip())
+            return
+        if line.startswith("Running "):
+            self.pending = (line[len("Running "):].strip(), [])
+            return
+        if re.match(r"^Added .*output to the chat\.$", line):
+            return
+        if line.startswith("Added ") and line.endswith(" to the chat."):
+            return
+
+        if self.is_error(line):
+            self.errors.append(line)
+            self.error_mode = True
+            self.emit.log(line)
+            if "has hit a token limit!" in line:
+                self.exhausted = True
+            return
+        if line.startswith(NOT_FATAL):
+            self.emit.log(line)
+            return
+
+        if not line:
+            if self.skip_blank:
+                self.skip_blank = False
+            elif self.error_mode:
+                self.error_mode = False
+            elif self.mode == "thinking":
+                self.emit.think("\n")
+            elif self.mode == "answer":
+                self.emit.say("\n")
+            return
+
+        if self.error_mode:
+            self.errors.append(line)
+            self.emit.log(line)
+            return
+
+        if self.mode == "thinking":
+            self.saw_content = True
+            self.emit.think(line + "\n")
+        elif self.mode == "answer":
+            self.saw_content = True
+            self.answer.append(line)
+            self.emit.say(line + "\n")
+        elif self.mode == "prelude" and not line.startswith(BANNER):
+            self.mode = "answer"
+            self.saw_content = True
+            self.answer.append(line)
+            self.emit.say(line + "\n")
+        elif self.mode == "prelude":
+            return
+        else:
+            self.emit.log(line)                       # a filename echoed before an edit, or bookkeeping
+
+    def is_error(self, line):
+        return (line.startswith(ERROR_STARTS) or any(text in line for text in ERROR_CONTAINS)
+                or line.startswith("Error: "))
+
+    def boundary(self, line):
+        return (line.startswith("Running ") or line.startswith("Tokens: ") or line.startswith("Applied edit to ")
+                or line in (REASONING_START, ANSWER_START) or line.strip() in (THINKING, ANSWER)
+                or bool(PROMPT.search(line))
+                or self.is_error(line) or line.startswith(NOT_FATAL)
+                or bool(re.match(r"^Added .*output to the chat\.$", line)))
+
+    def flush_command(self):
+        command, output = self.pending
+        self.pending = None
+        text = "".join(piece + "\n" for piece in output).rstrip("\n")
+        if text:
+            text += "\n"
+        self.ran_any = True
+        self.emit.ran(command, stdout=text, exit_code=0)   # aider merges stderr into stdout and reports no code
+
+    def applied_file(self, path):
+        if not self.blocks_ready:
+            self.blocks = parse_blocks("\n".join(self.answer))
+            self.blocks_ready = True
+        entry = self.blocks.get(path)
+        if entry is None:
+            base = os.path.basename(path)
+            entry = next((value for name, value in self.blocks.items()
+                          if os.path.basename(name) == base), None)
+        if entry is None:
+            self.emit.edited(path, "")
+        elif entry["create"]:
+            self.emit.wrote(path, entry["diff"])
+        else:
+            self.emit.edited(path, entry["diff"])
+        self.applied.append(path)
+        self.remember(path)
+
+    def remember(self, path):
+        try:
+            saved = json.loads(self.state.get("files") or "[]")
+        except ValueError:
+            saved = []
+        if path not in saved:
+            saved.append(path)
+            self.state.set("files", json.dumps(saved[-MAX_FILES:]))
+
+    # -- the end -------------------------------------------------------------------------------------------
+
+    def produced(self):
+        return bool(self.saw_content or self.saw_usage or self.ran_any or self.applied or self.pending)
+
+    def finish(self, code):
+        if self.pending is not None:
+            self.flush_command()
+        if self.ended:
+            return
+        usage = None
+        if self.saw_usage:
+            usage = {"input_tokens": self.sent, "output_tokens": self.received,
+                     "input_tokens_details": {"cached_tokens": self.cached}}
+        self.ended = True
+        if self.exhausted:
+            self.emit.incomplete("max_output_tokens", usage)
+        elif self.errors and not self.saw_usage:
+            message = "\n".join(self.errors).strip()[:2000]
+            code_name = "provider_error" if any(e.startswith(ERROR_STARTS) for e in self.errors) else "cli_error"
+            self.emit.failed(code_name, message, usage)
+        elif self.produced():
+            self.emit.done(usage)
+        else:
+            self.emit.failed("cli_exit", f"aider exited with code {code} without a response.", usage)
+
+
+def run_once(request, emit, state, prefix, files, restore):
+    translator = Translator(emit, state)
+    cli = hgkit.Cli(command(request, prefix, files, restore), env=provider_settings()[0], stdin="")
+    for line in cli.lines():
+        translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    prime_model_cache()
+    _, prefix = provider_settings()
+    files = work_files(request, state)
+    chat = os.path.join(os.environ["HG_MIND"], ".aider", "chat.history.md")
+    if request.mcp_servers:
+        emit.log("aider has no MCP support: the request's MCP tools were not given to it")
+    text = request.body.get("text")
+    if isinstance(text, dict) and text.get("format"):
+        emit.log("aider cannot enforce text.format: the answer is not constrained to it")
+
+    translator, code = run_once(request, emit, state, prefix, files, True)
+    if (code not in (0, None) and not translator.produced() and os.path.exists(chat)):
+        # Its own record of the conversation is unreadable (a stopped turn can leave it so): start anew.
+        emit.log(f"aider could not restore its chat history (exit code {code}); starting a new session")
+        try:
+            os.unlink(chat)
+        except OSError:
+            pass
+        state.clear("files")
+        translator, code = run_once(request, emit, state, prefix, files, False)
+    translator.finish(code)
+
+
+if __name__ == "__main__":
+    main()

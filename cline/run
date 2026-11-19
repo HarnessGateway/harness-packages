@@ -1,0 +1,861 @@
+#!/usr/bin/env python3
+"""One turn of the Cline CLI, over its Agent Client Protocol (ACP).
+
+Cline's one-shot mode (`cline --json "…"`) prints a turn's events but always starts a new session: its
+`--id` resumes only the interactive TUI, which refuses JSON output. ACP (`cline --acp`) is the CLI's own
+headless, bidirectional interface: it creates a session, reports its id, streams the agent's text, reasoning
+and tool calls, and loads that session by id on the next turn. So this package drives ACP: it writes JSON-RPC
+on the CLI's standard input, reads the CLI's standard output a line at a time, and turns `session/update`
+notifications into Responses events.
+
+The CLI is run by this file directly rather than through hgkit.Cli: hgkit.Cli writes its standard input once
+and closes it, and a protocol needs to keep talking. For the platform's checker the recorded standard output
+is replayed here instead (HG_REPLAY), and every line is translated exactly as a live turn translates it.
+"""
+
+import json
+import os
+import queue
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+CLINE = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "cline")
+HOME = os.environ["HOME"]
+CONFIG = os.path.join(HOME, ".cline")
+DATA = os.path.join(CONFIG, "data")
+WORK = os.environ["HG_WORK"]
+DIFF_MAX = 100_000
+TEXT_MAX = 100_000
+
+# The CLI's provider ids, from its own provider registry: the Anthropic Messages API, an OpenAI-compatible
+# Chat Completions endpoint, OpenAI's own, and Gemini. Only the first two are declared in harness.json.
+PROVIDERS = {
+    "anthropic": "anthropic",
+    "openai-chat": "openai-compatible",
+    "openai-responses": "openai-native",
+    "gemini": "gemini",
+}
+
+# Tool names the CLI reports in a tool call's title ("editor: {…}", "run_commands: …").
+TOOLS = {
+    "ask_question", "editor", "fetch_web_content", "read_files", "run_commands", "search_codebase",
+    "skills", "spawn_agent", "submit_and_exit", "use_mcp_tool", "access_mcp_resource",
+}
+TITLE = re.compile(r"^([a-z_][a-z0-9_]*): ", re.IGNORECASE)
+
+# ACP 3.0.74 reports no token counts: no `usage_update` notification is ever sent, and the session/prompt
+# answer is just {"stopReason": …} (no `usage`, no `_meta`). The CLI does keep per-session totals, and its
+# documented `cline history --json` prints them (`metadata.usage`). Reading that command is how this package
+# learns a turn's counts; the turn's own share is the difference from the totals before its prompt.
+HISTORY_LIMIT = 200
+HISTORY_TIMEOUT_S = 30
+USAGE_FIELDS = {"input_tokens": "inputTokens", "output_tokens": "outputTokens"}
+CACHED_FIELD = "cacheReadTokens"
+
+
+# ── the mind: the CLI's own settings (never a key, and never a file under /harness) ───────────────────────
+
+
+def _write_json(path, value):
+    """Write a settings file the CLI owns, in place, without leaving a half-written one."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(value, file, indent=2)
+        file.write("\n")
+    os.replace(temporary, path)
+
+
+def _read_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as file:
+            value = json.load(file)
+        return value if isinstance(value, dict) else default
+    except (OSError, ValueError):
+        return default
+
+
+def prepare(provider, model, base_url):
+    """Point the CLI at this turn's provider, and turn off the traffic that assumes the provider is Cline's.
+
+    The key is handed over in CLINE_API_KEY, not written here: it is a placeholder that changes every turn,
+    and the mind should not keep it. The base URL has to be in the CLI's own provider settings; Cline's
+    `auth --baseurl` accepts one only for OpenAI-compatible providers, but its provider settings honour it
+    for the Anthropic provider too (that is how this package is tried).
+    """
+    settings = os.path.join(DATA, "settings")
+    providers_path = os.path.join(settings, "providers.json")
+    providers = _read_json(providers_path, {})
+    providers["version"] = 1
+    providers["lastUsedProvider"] = provider
+    if not isinstance(providers.get("modes"), dict):
+        providers["modes"] = {}
+    entries = providers.get("providers")
+    if not isinstance(entries, dict):
+        entries = providers["providers"] = {}
+    entry = entries.get(provider) if isinstance(entries.get(provider), dict) else {}
+    values = entry.get("settings") if isinstance(entry.get("settings"), dict) else {}
+    values.update({"provider": provider, "model": model, "baseUrl": base_url})
+    values.pop("apiKey", None)                         # a placeholder from an earlier turn is not kept
+    entry["settings"] = values
+    # The CLI ignores a provider entry without this stamp (writes it itself from `cline auth`); a fixed one
+    # would age, so it is this turn's.
+    entry["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    entry.pop("tokenSource", None)
+    entries[provider] = entry
+    _write_json(providers_path, providers)
+
+    global_path = os.path.join(settings, "global-settings.json")
+    global_settings = _read_json(global_path, {})
+    global_settings.setdefault("version", "1.0.0")
+    global_settings["telemetryEnabled"] = False        # no PostHog feature-flag/telemetry request to data.cline.bot
+    global_settings["openTelemetryEnabled"] = False
+    _write_json(global_path, global_settings)
+
+
+def environment(provider, model):
+    env = dict(os.environ)
+    env.update({
+        "CLINE_PROVIDER": provider,
+        "CLINE_MODEL": model,
+        "CLINE_API_KEY": os.environ["HG_PROVIDER_KEY"],  # a placeholder: the platform's proxy puts in the key
+        # The CLI's own data folder, under the mind. CLINE_DATA_DIR is what its ACP runtime reads; the
+        # --data-dir flag would put it in "sandbox" mode, which reads its settings elsewhere.
+        "CLINE_DATA_DIR": DATA,
+        "CLINE_NO_AUTO_UPDATE": "1",
+        "DISABLE_TELEMETRY": "1",
+        "OTEL_TELEMETRY_ENABLED": "0",
+        # The CLI's feature-flag poll goes to data.cline.bot before any setting is read. Its own switch for
+        # a run that must not make that request is E2E_TEST; it then uses a provider that answers nothing.
+        "E2E_TEST": "true",
+        "AI_SDK_LOG_WARNINGS": "false",
+    })
+    return env
+
+
+def mcp_servers(request):
+    """The request's MCP servers in ACP's shape: remote HTTP servers with their headers."""
+    found = []
+    for server in request.mcp_servers:
+        label = server.get("server_label")
+        url = server.get("server_url")
+        if not label or not url:
+            continue
+        entry = {"type": "http", "name": label, "url": url}
+        headers = server.get("headers")
+        if isinstance(headers, dict):
+            entry["headers"] = [{"name": str(name), "value": str(value)}
+                                for name, value in headers.items()]
+        found.append(entry)
+    return found
+
+
+def thinking_level(request):
+    """The request's reasoning effort in the levels Cline accepts: none|low|medium|high|xhigh."""
+    effort = request.effort
+    if not isinstance(effort, str):
+        return None
+    return {"minimal": "low", "low": "low", "medium": "medium", "high": "high",
+            "xhigh": "xhigh", "none": "none"}.get(effort.lower())
+
+
+def note_unhonoured(request, emit):
+    """Say once when the request asks for an output shape the CLI cannot enforce."""
+    text = request.body.get("text")
+    if isinstance(text, dict) and isinstance(text.get("format"), dict):
+        kind = text["format"].get("type")
+        if kind and kind != "text":
+            emit.log(f"Cline has no option for text.format ({kind}); the answer is plain text.")
+
+
+def history_usage(rows, session):
+    """The `metadata.usage` of this session in `cline history --json` rows, or None."""
+    row = next((item for item in rows
+                if isinstance(item, dict) and item.get("sessionId") == session), None)
+    metadata = row.get("metadata") if isinstance(row, dict) else None
+    usage = metadata.get("usage") if isinstance(metadata, dict) else None
+    return usage if isinstance(usage, dict) else None
+
+
+def history(env, session):
+    """The CLI's documented session history, and this session's cumulative usage in it.
+
+    `cline history --json` is the CLI's own machine-readable history command (`cline history --help`), and
+    each session's `metadata.usage` holds `inputTokens`, `outputTokens`, `cacheReadTokens` and
+    `cacheWriteTokens` — the same numbers `cline -v` prints as its run stats. It is written while the ACP
+    session is still open, so it can be read the moment a prompt answers. Returns (usage, the command's
+    stdout as one line or None); a session whose row is not there yet gives (None, stdout).
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 - the command is this package's own CLI
+            [CLINE, "history", "--json", "--limit", str(HISTORY_LIMIT)],
+            env=dict(env), cwd=WORK, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=HISTORY_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    raw = done.stdout.strip()
+    if done.returncode != 0 or not raw:
+        return None, None
+    try:
+        rows = json.loads(raw)
+        line = json.dumps(rows)                       # one line, whatever the CLI's own spacing was
+    except ValueError:
+        return None, None
+    if not isinstance(rows, list):
+        return None, None
+    return history_usage(rows, session), line
+
+
+def usage_delta(before, after):
+    """This turn's usage: the session's cumulative counts after the prompt less those before it.
+
+    The history totals are for the whole session, so a resumed turn reports only what it added. Cached input
+    is a detail of the input count (`inputTokens` already includes it, as the CLI's own conversion to a
+    no-cache count subtracts `cacheReadTokens`); Responses has no place for cache writes.
+    """
+    if not isinstance(after, dict):
+        return None
+    before = before if isinstance(before, dict) else {}
+    usage = {}
+    for target, field in USAGE_FIELDS.items():
+        value = after.get(field)
+        if not isinstance(value, int):
+            return None
+        base = before.get(field)
+        usage[target] = max(0, value - (base if isinstance(base, int) else 0))
+    cached = after.get(CACHED_FIELD)
+    if isinstance(cached, int):
+        base = before.get(CACHED_FIELD)
+        usage["input_tokens_details"] = {"cached_tokens": max(0, cached - (base if isinstance(base, int) else 0))}
+    if usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
+        return None                    # the session has a row, but no model call reported any counts
+    return usage
+
+
+# ── processes the CLI leaves behind ───────────────────────────────────────────────────────────────────────
+
+_PR_SET_CHILD_SUBREAPER = 36               # <linux/prctl.h>
+
+
+def _keep_what_the_cli_starts():
+    """Keep every process the CLI leaves running apart from itself below this one, where a stop can find it."""
+    try:
+        import ctypes
+        ctypes.CDLL(None).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _started_by_run():
+    """The processes below this one that are still running, read from /proc. None where there is no /proc."""
+    parents = {}
+    try:
+        for entry in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                with open(f"/proc/{entry}/stat", encoding="utf-8") as file:
+                    state, parent = file.read().rpartition(")")[2].split()[:2]
+                if state != "Z":                   # one that has ended and is not yet collected
+                    parents[int(entry)] = int(parent)
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        return []
+    found, above = [], {os.getpid()}
+    while above:
+        above = {pid for pid, parent in parents.items() if parent in above}
+        found.extend(above)
+    return found
+
+
+# ── the CLI's lines in, Responses events out ──────────────────────────────────────────────────────────────
+
+
+def _relpath(path):
+    """A path the agent used, relative to the work folder when it is inside it."""
+    if not isinstance(path, str) or not path:
+        return ""
+    try:
+        inside = os.path.relpath(path, WORK)
+    except ValueError:
+        return path
+    return path if inside.startswith("..") else inside
+
+
+def _lines(text, mark):
+    return "".join(f"{mark}{line}\n" for line in str(text or "").splitlines())[:DIFF_MAX]
+
+
+def _output_text(raw):
+    """A tool result's text, whatever shape ACP reported it in (an object, a list of results, or a string)."""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict):
+        for key in ("result", "error", "message"):
+            if isinstance(raw.get(key), str) and raw[key]:
+                return raw[key]
+        return json.dumps(raw)[:TEXT_MAX]
+    if isinstance(raw, list):
+        pieces = []
+        for item in raw:
+            if isinstance(item, dict):
+                value = item.get("result") or item.get("error")
+                pieces.append(value if isinstance(value, str) else "")
+            elif isinstance(item, str):
+                pieces.append(item)
+        return "\n".join(piece for piece in pieces if piece)
+    return "" if raw is None else str(raw)
+
+
+def _call_name(call):
+    """The tool's name: the prefix of the title ACP gives, or the ACP kind when the title has none."""
+    title = call.get("title") or ""
+    match = TITLE.match(title)
+    if match and match.group(1).lower() in TOOLS:
+        return match.group(1).lower()
+    head = title.split(": ", 1)[0].strip()
+    if head in TOOLS or head.startswith("team_"):
+        return head
+    return {"execute": "run_commands", "edit": "editor", "read": "read_files",
+            "search": "search_codebase", "fetch": "fetch_web_content"}.get(call.get("kind"), head or "tool")
+
+
+def _arguments(value):
+    """The arguments of an MCP tool as an object: the CLI may give them as a string."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return {} if value is None else value
+
+
+class Translator:
+    """ACP `session/update` notifications in, Responses items out."""
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.calls = {}                    # toolCallId -> the tool_call update, waiting for its result
+
+    def update(self, update):
+        kind = update.get("sessionUpdate")
+        if kind == "agent_message_chunk":
+            self.emit.say(self._text(update.get("content")))
+        elif kind == "agent_thought_chunk":
+            self.emit.think(self._text(update.get("content")))
+        elif kind == "user_message_chunk":
+            pass                                    # the prompt coming back, not the agent's work
+        elif kind == "tool_call":
+            identifier = update.get("toolCallId")
+            if identifier:
+                self.calls[identifier] = update
+            else:
+                self.emit.log(f"Cline reported a tool call without an id: {json.dumps(update)[:500]}")
+        elif kind == "tool_call_update":
+            self.finish(update)
+        elif kind in ("session_info_update", "available_commands_update", "current_mode_update",
+                      "config_option_update", "plan", "usage_update"):
+            # usage_update would carry a context window's used/size, not a turn's input and output tokens,
+            # and 3.0.74 never sends one; the counts come from `cline history --json` (see history()).
+            pass
+        elif kind:
+            self.emit.log(f"Cline update {kind}: {json.dumps(update)[:2000]}")
+        else:
+            self.emit.log(f"Cline update: {json.dumps(update)[:2000]}")
+
+    @staticmethod
+    def _text(content):
+        if isinstance(content, dict):
+            return str(content.get("text") or "")
+        return ""
+
+    def finish(self, update):
+        identifier = update.get("toolCallId")
+        call = self.calls.pop(identifier, None)
+        if call is None:
+            self.emit.log(f"Cline finished a tool call it never announced: {json.dumps(update)[:500]}")
+            return
+        name = _call_name(call)
+        if name == "submit_and_exit":
+            return                                  # how the CLI ends a one-shot run, not work the agent did
+        given = call.get("rawInput")
+        if not isinstance(given, dict):
+            given = {}
+        raw = update.get("rawOutput")
+        text = _output_text(raw)[:TEXT_MAX]
+        failed = update.get("status") == "failed"
+
+        if name == "run_commands" or call.get("kind") == "execute":
+            self._commands(given, raw, text, failed)
+        elif name == "editor" or call.get("kind") == "edit":
+            self._edit(given, text, failed)
+        elif name == "use_mcp_tool":
+            server = given.get("server_name") or given.get("server") or "mcp"
+            tool = given.get("tool_name") or given.get("tool") or "tool"
+            self.emit.called(str(server), str(tool), _arguments(given.get("arguments")),
+                             output=None if failed else text, error=text if failed else None)
+        elif name.startswith("team_") or name in TOOLS:
+            self.emit.used(name, json.dumps(given)[:TEXT_MAX], text)
+        else:
+            self.emit.used(name, json.dumps(given)[:TEXT_MAX], text)
+
+    def _commands(self, given, raw, text, failed):
+        commands = given.get("commands")
+        if isinstance(commands, str):
+            commands = [commands]
+        if not isinstance(commands, list) or not commands:
+            self.emit.used("run_commands", json.dumps(given)[:TEXT_MAX], text)
+            return
+        results = raw if isinstance(raw, list) else []
+        if len(commands) == 1 and not results:
+            results = [{"result": text, "success": not failed}]
+        for number, command in enumerate(commands):
+            result = results[number] if number < len(results) and isinstance(results[number], dict) else {}
+            ok = bool(result.get("success", not failed))
+            said = result.get("result") or result.get("error") or ""
+            if not said and len(commands) == 1:
+                said = text
+            self.emit.ran(str(command), stdout=said if ok else "", stderr="" if ok else said,
+                          exit_code=0 if ok else 1)
+
+    def _edit(self, given, text, failed):
+        path = _relpath(given.get("path") or given.get("file_path") or "")
+        new = given.get("new_text")
+        if new is None:
+            new = given.get("content")
+        old = given.get("old_text")
+        if failed:
+            # The edit did not happen, but the attempt did: report it as a tool that failed.
+            self.emit.used("editor", json.dumps(given)[:TEXT_MAX], text or "the edit failed")
+        elif isinstance(old, str) and old:
+            self.emit.edited(path, (_lines(old, "-") + _lines(new, "+"))[:DIFF_MAX])
+        elif "created" in (text or "").lower():
+            self.emit.wrote(path, _lines(new, "+"))
+        elif "edited" in (text or "").lower() or "insert_line" in given or "old_text" in given:
+            self.emit.edited(path, _lines(new, "+"))
+        else:
+            self.emit.wrote(path, _lines(new, "+"))
+
+
+# ── the protocol ──────────────────────────────────────────────────────────────────────────────────────────
+
+
+class Stopped(Exception):
+    """The platform stopped the turn; print no terminal line and end."""
+
+
+class Failure(Exception):
+    """The turn failed, with a message a person can act on."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def _error_message(response):
+    error = response.get("error") or {}
+    data = error.get("data")
+    message = data.get("message") if isinstance(data, dict) and data.get("message") else error.get("message")
+    message = str(message or "the CLI reported an error without a message")
+    prefix = "Internal error: "
+    return message[len(prefix):] if message.startswith(prefix) else message
+
+
+class Protocol:
+    """A running `cline --acp`, and the JSON-RPC conversation with it."""
+
+    def __init__(self, emit, stopping, record_path=None):
+        self.emit = emit
+        self.stopping = stopping
+        self.record_path = record_path
+        self.process = None
+        self.queue = queue.Queue()
+        self.next_id = 1
+        self.lock = threading.Lock()
+        self._record = None
+        self._record_lock = threading.Lock()
+        self._session = None
+
+    def start(self, args, env):
+        if self.record_path:
+            self._record = open(self.record_path, "a", encoding="utf-8")  # noqa: SIM115 - closed in close()
+        self.process = subprocess.Popen(  # noqa: S603 - the command is this package's own
+            args, env=dict(env), cwd=WORK, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True,
+        )
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def note(self, line):
+        """Put one more real CLI line in the recording: a `cline history --json` reading, for the checker.
+
+        A live turn reads the counts from the CLI's history command; a recording has no CLI, so the reading
+        it produced goes in beside the ACP stream. It is a JSON array, which is not an ACP message.
+        """
+        if self._record is None or not line:
+            return
+        with self._record_lock:
+            self._record.write(line + "\n")
+            self._record.flush()
+
+    def _read(self):
+        try:
+            for line in self.process.stdout:
+                if self._record is not None:
+                    with self._record_lock:
+                        self._record.write(line)
+                        self._record.flush()
+                self.queue.put(line.rstrip("\n"))
+        finally:
+            self.queue.put(None)
+
+    def send(self, method, params, notification=False):
+        message = {"jsonrpc": "2.0", "method": method, "params": params}
+        identifier = None
+        if not notification:
+            identifier = self.next_id
+            self.next_id += 1
+            message["id"] = identifier
+        try:
+            with self.lock:
+                self.process.stdin.write(json.dumps(message) + "\n")
+                self.process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            return identifier
+        return identifier
+
+    def reply(self, identifier, result=None, error=None):
+        message = {"jsonrpc": "2.0", "id": identifier}
+        if error is not None:
+            message["error"] = error
+        else:
+            message["result"] = result if result is not None else {}
+        try:
+            with self.lock:
+                self.process.stdin.write(json.dumps(message) + "\n")
+                self.process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    def answer(self, message):
+        """A request the CLI makes of its client. Nothing here needs a person: tools are auto-approved."""
+        method = message.get("method") or ""
+        identifier = message.get("id")
+        if method == "session/request_permission":
+            options = (message.get("params") or {}).get("options") or []
+            chosen = next((option for option in options
+                           if option.get("kind") in ("allow_once", "allow_always")), None)
+            if chosen is None and options:
+                chosen = options[0]
+            self.reply(identifier, {"outcome": {"outcome": "selected", "optionId": chosen.get("optionId")}}
+                       if chosen else {"outcome": {"outcome": "cancelled"}})
+        else:
+            # fs/* and terminal/* were not offered in initialize; nothing else is a tool this package can run.
+            self.reply(identifier, error={"code": -32601, "message": f"this client does not support {method}"})
+
+    def wait(self, identifier, translator=None):
+        """The response to a request, passing notifications to the translator and answering the CLI's requests."""
+        while True:
+            if self.stopping.is_set():
+                raise Stopped()
+            try:
+                line = self.queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if line is None:
+                return None
+            try:
+                message = json.loads(line)
+            except ValueError:
+                self.emit.log(line[:2000])
+                continue
+            if not isinstance(message, dict):
+                self.emit.log(line[:2000])
+            elif "method" in message:
+                if "id" in message:
+                    self.answer(message)
+                elif translator is not None and message.get("method") == "session/update":
+                    update = (message.get("params") or {}).get("update")
+                    if isinstance(update, dict):
+                        translator.update(update)
+            elif message.get("id") == identifier:
+                return message
+            # any other response is to a request this turn has already dealt with
+
+    def cancel(self, session):
+        if session:
+            self.send("session/cancel", {"sessionId": session}, notification=True)
+
+    def close(self):
+        """End the CLI and everything it started, then the recording. Never raises: a stopped turn has
+        nothing more to say, and a terminal line, once printed, must be the last thing on standard output."""
+        process = self.process
+        try:
+            if process is not None:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                # Whether or not the launcher exited, a daemon it started for itself (Cline starts a local
+                # hub) is still below this process thanks to the subreaper. It belongs to this turn and is
+                # stopped here, so the next turn starts from what the mind holds and nothing else.
+                started = set(_started_by_run())
+                for pid in started:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                deadline = time.time() + 3
+                while time.time() < deadline and _started_by_run():
+                    time.sleep(0.1)
+                for pid in _started_by_run():
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+        except OSError:
+            pass
+        finally:
+            if self._record is not None:
+                try:
+                    self._record.close()
+                except OSError:
+                    pass
+                self._record = None
+
+
+# ── one turn ──────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def _terminal(response, emit, usage=None):
+    """The turn's one terminal line, from the ACP prompt response."""
+    if "error" in response:
+        emit.failed("provider_error", f"Cline's request to the provider failed: {_error_message(response)}",
+                    usage)
+        return
+    reason = (response.get("result") or {}).get("stopReason")
+    if reason == "end_turn":
+        emit.done(usage)
+    elif reason == "max_tokens":
+        emit.incomplete("max_output_tokens", usage)
+    elif reason == "refusal":
+        emit.incomplete("content_filter", usage)
+    elif reason == "cancelled":
+        emit.failed("cancelled", "Cline cancelled the turn before it finished.", usage)
+    else:
+        emit.failed("cli_error", f"Cline stopped the turn with {reason or 'no reason'}.", usage)
+
+
+def live(request, emit, state, stopping):
+    """Start the CLI, resume or open its session, and ask this turn's brief."""
+    note_unhonoured(request, emit)
+    provider = PROVIDERS.get(os.environ.get("HG_PROVIDER_API", ""), "anthropic")
+    model = os.environ["HG_MODEL"]
+    prepare(provider, model, os.environ["HG_PROVIDER_URL"])
+
+    servers = mcp_servers(request)
+    if any(server.get("allowed_tools") for server in request.mcp_servers):
+        emit.log("Cline's ACP interface exposes every tool of an MCP server: allowed_tools is not enforced.")
+
+    # The folders are chosen with CLINE_DATA_DIR, not --data-dir: that flag puts the CLI in its "sandbox"
+    # mode, which reads its settings from somewhere other than the file named. Auto-approve every tool:
+    # this is a headless turn, and the sandbox is already the barrier. --yolo would also switch the CLI
+    # into its one-shot "yolo" mode, which is not what ACP needs.
+    args = [CLINE, "--acp", "--auto-approve", "true"]
+    level = thinking_level(request)
+    if level:
+        args += ["--thinking", level]
+
+    env = environment(provider, model)
+    protocol = Protocol(emit, stopping, os.environ.get("HGKIT_RECORD"))
+    protocol.start(args, env)
+    try:
+        initialized = protocol.wait(protocol.send("initialize", {
+            "protocolVersion": 1,
+            "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+            "clientInfo": {"name": "harnessgateway", "version": os.environ.get("HG_HARNESS_VERSION", "1")},
+        }))
+        if initialized is None:
+            raise Failure("cli_exit", "Cline exited before it started answering.")
+        if "error" in initialized:
+            raise Failure("cli_error", f"Cline refused the protocol handshake: {_error_message(initialized)}")
+
+        session = None
+        saved = state.get("session")
+        if saved:
+            loaded = protocol.wait(protocol.send("session/load", {
+                "sessionId": saved, "cwd": WORK, "mcpServers": servers}))
+            if loaded is not None and "result" in loaded:
+                session = saved
+            else:
+                said = _error_message(loaded) if loaded is not None else "it exited"
+                emit.log(f"Cline could not resume its session {saved} ({said}); starting a new one.")
+                state.clear("session")
+        if session is None:
+            opened = protocol.wait(protocol.send("session/new", {"cwd": WORK, "mcpServers": servers}))
+            if opened is None:
+                raise Failure("cli_exit", "Cline exited before it opened a session.")
+            if "error" in opened:
+                raise Failure("cli_error", f"Cline could not start a session: {_error_message(opened)}")
+            session = str((opened.get("result") or {}).get("sessionId") or "")
+            if not session:
+                raise Failure("cli_error", "Cline started a session without reporting its id.")
+            state.set("session", session)           # the moment it is reported: a stopped turn is continued
+        protocol._session = session                 # so a stop can tell the CLI which session to cancel
+
+        selected = protocol.wait(protocol.send("session/set_model", {"sessionId": session, "modelId": model}))
+        if selected is not None and "error" in selected:
+            emit.log(f"Cline did not accept model {model}: {_error_message(selected)}")
+
+        # The session's totals before this turn: a resumed session already carries earlier turns' counts.
+        before, before_line = history(env, session)
+        protocol.note(before_line)
+        if stopping.is_set():
+            raise Stopped()
+
+        translator = Translator(emit)
+        brief = request.brief()
+        answer = protocol.wait(protocol.send("session/prompt", {
+            "sessionId": session, "prompt": [{"type": "text", "text": brief}]}), translator=translator)
+        if answer is None:
+            code = protocol.process.poll() if protocol.process else None
+            raise Failure("cli_exit", f"Cline exited with code {code} before the turn finished.")
+        # The CLI writes the session's new totals before the prompt answers, so its history is this turn's.
+        after, after_line = history(env, session)
+        protocol.note(after_line)
+        # Both readings are needed for a delta; without them, report no counts rather than guess.
+        usage = usage_delta(before, after) if before_line and after_line else None
+        _terminal(answer, emit, usage)
+    except Stopped:
+        protocol.cancel(protocol._session)
+        raise
+    finally:
+        protocol.close()
+
+
+# ── replaying a recorded turn (the platform's check) ─────────────────────────────────────────────────────
+
+
+def replay(recording, emit, request):
+    """Translate a recorded standard output exactly as a live turn would have."""
+    note_unhonoured(request, emit)
+    messages = []
+    snapshots = []                     # `cline history --json` readings a live turn took: before, then after
+    with open(recording, encoding="utf-8") as file:
+        for line in file:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                emit.log(line[:2000])
+                continue
+            if isinstance(message, dict):
+                messages.append(message)
+            elif isinstance(message, list):
+                snapshots.append(message)   # not ACP: a history reading this turn's recording kept
+            else:
+                emit.log(line[:2000])
+
+    # Everything before the session response is the session/load replay of earlier turns (or the handshake):
+    # live turns ignore it, so it is not output again. The session response is the result carrying `modes`.
+    session_at = None
+    for number, message in enumerate(messages):
+        if isinstance(message.get("result"), dict) and "modes" in message["result"]:
+            session_at = number
+    if session_at is None:
+        for message in messages:
+            if "error" in message:
+                _terminal(message, emit)
+                return
+        emit.failed("cli_exit", "The recorded turn has no session and no result.")
+        return
+
+    # The session id, from a load replay's notifications or a new session's result.
+    session = None
+    for message in messages:
+        params, result = message.get("params"), message.get("result")
+        if isinstance(params, dict) and isinstance(params.get("sessionId"), str):
+            session = params["sessionId"]
+            break
+        if isinstance(result, dict) and isinstance(result.get("sessionId"), str):
+            session = result["sessionId"]
+            break
+    # A turn records two readings, before its prompt and after it; only then can the delta be known.
+    before = history_usage(snapshots[0], session) if len(snapshots) >= 2 else None
+    after = history_usage(snapshots[-1], session) if len(snapshots) >= 2 else None
+    usage = usage_delta(before, after)
+
+    translator = Translator(emit)
+    for message in messages[session_at + 1:]:
+        if "method" in message:
+            if "id" not in message and message.get("method") == "session/update":
+                update = (message.get("params") or {}).get("update")
+                if isinstance(update, dict):
+                    translator.update(update)
+            continue
+        if "error" in message or "stopReason" in (message.get("result") or {}):
+            _terminal(message, emit, usage)
+            return
+    emit.failed("cli_exit", "The recorded turn ended before Cline answered.")
+
+
+# ── main ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    recording = os.environ.get("HG_REPLAY")
+    if recording:
+        replay(recording, emit, request)
+        return
+    hgkit.seed()
+    _keep_what_the_cli_starts()
+
+    stopping = threading.Event()
+
+    def stop(*_):
+        stopping.set()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        live(request, emit, state, stopping)
+    except Stopped:
+        return
+    except Failure as failure:
+        emit.failed(failure.code, str(failure))
+    except OSError as error:
+        emit.failed("cli_start", f"Cline could not be started: {error}")
+    except Exception as error:  # noqa: BLE001 - a turn always ends with a line a person can read
+        try:
+            emit.failed("internal_error", f"the harness could not run the turn: {error}")
+        except RuntimeError:
+            pass                       # a terminal line was already printed; nothing more may be said
+
+
+if __name__ == "__main__":
+    main()

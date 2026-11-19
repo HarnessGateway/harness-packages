@@ -1,0 +1,11 @@
+{
+  "model": "default/kilo/deepseek/deepseek-flash",
+  "input": "Use the echo tool of the echo MCP server to echo the text BANANA. Then tell me what it returned.",
+  "tools": [
+    {
+      "type": "mcp",
+      "server_label": "echo",
+      "server_url": "http://127.0.0.1:8765/mcp"
+    }
+  ]
+}

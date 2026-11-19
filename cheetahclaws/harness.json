@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "name": "cheetahclaws",
+  "version": "3.5.90-1",
+  "description": "CheetahClaws, unmodified.",
+  "mind": ".cheetahclaws",
+  "apis": ["anthropic", "openai-chat"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 10 }
+}

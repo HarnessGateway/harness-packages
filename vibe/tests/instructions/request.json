@@ -1,0 +1,5 @@
+{
+  "model": "builder/vibe/deepseek/deepseek-flash",
+  "input": "What is 2+2?",
+  "instructions": "Answer in French, in one short sentence."
+}

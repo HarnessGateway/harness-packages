@@ -1,0 +1,12 @@
+Analytics have been permanently disabled.
+
+Aider v0.86.2
+Model: anthropic/no-such-model with diff edit format
+Git repo: none
+Repo-map: disabled
+
+litellm.BadRequestError: AnthropicException - 
+b'{"type":"error","error":{"type":"invalid_request_error","message":"The 
+supported API model names are deepseek-flash, deepseek-v4-pro, but you passed 
+no-such-model. (request_id: 289b8122-6edc-4029-ab4e-730fcdc2eb7a)"}}'
+

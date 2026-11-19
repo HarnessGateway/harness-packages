@@ -1,0 +1,11 @@
+{"event": "session", "session": "cli:direct"}
+{"event": "text", "text": "Hello"}
+{"event": "text", "text": "!"}
+{"event": "text", "text": " It"}
+{"event": "text", "text": "'s"}
+{"event": "text", "text": " nice"}
+{"event": "text", "text": " to"}
+{"event": "text", "text": " meet"}
+{"event": "text", "text": " you"}
+{"event": "text", "text": "."}
+{"event": "done", "content": "Hello! It's nice to meet you.", "stop_reason": "completed", "error": null, "usage": {"input_tokens": 5587, "output_tokens": 10, "cached_tokens": 5376}}

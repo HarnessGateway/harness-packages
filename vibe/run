@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""One turn of Mistral Vibe (https://github.com/mistralai/mistral-vibe), headless.
+
+`vibe -p --output streaming` prints one JSON object per line: the history entries of the turn as they complete.
+A user message, the assistant's messages and reasoning, one entry per tool effect, and notices. This file turns
+those entries into Responses events and ends the turn with one terminal line.
+"""
+
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+VIBE = os.path.join(os.environ["HG_HARNESS"], "tools", "bin", "vibe")
+WORK = os.environ["HG_WORK"]
+DIFF_MAX = 100_000
+
+# The generic adapter Vibe selects for each provider API the manifest lists.
+API_STYLES = {
+    "anthropic": "anthropic",           # Anthropic Messages
+    "openai-chat": "openai",            # Chat Completions
+    "openai-responses": "openai-responses",
+}
+
+
+def settings_env(variables, servers, effort, max_output_tokens, temperature, top_p):
+    """This turn's provider, model and MCP servers, as Vibe's own VIBE_* environment layer.
+
+    The environment layer outranks the user's config.toml and a trusted project's `.vibe/config.toml`, so a
+    project in the work folder cannot redirect the turn to another provider or model. The provider's key is
+    named, never written: the variable holds a placeholder the platform's proxy replaces.
+    """
+    style = API_STYLES.get(variables.get("HG_PROVIDER_API", ""), "openai")
+    model = {"name": variables["HG_MODEL"], "provider": "platform", "alias": "harness",
+             "display_name": "Harness model"}
+    if temperature is not None and 0 <= temperature <= 2:
+        model["temperature"] = temperature
+    if top_p is not None and 0 < top_p <= 1:
+        model["top_p"] = top_p
+    if effort:
+        model["thinking"] = effort
+    if max_output_tokens:
+        model["max_output_tokens"] = int(max_output_tokens)
+    settings = {
+        "VIBE_ACTIVE_MODEL": "harness",
+        # A project's allowed_models must not hide the model the request named.
+        "VIBE_ALLOWED_MODELS": "[]",
+        "VIBE_ENABLE_TELEMETRY": "false",
+        "VIBE_ENABLE_UPDATE_CHECKS": "false",
+        "VIBE_ENABLE_AUTO_UPDATE": "false",
+        "VIBE_ENABLE_NOTIFICATIONS": "false",
+        "VIBE_ENABLE_PR_MONITORING": "false",
+        "VIBE_EXPERIMENTS__ENABLE": "false",
+        "VIBE_PROVIDERS": json.dumps([{
+            "name": "platform",
+            "api_base": variables["HG_PROVIDER_URL"],
+            "api_key_env_var": "HG_PROVIDER_KEY",
+            "api_style": style,
+            "backend": "generic",
+        }], ensure_ascii=False),
+        "VIBE_MODELS": json.dumps([model], ensure_ascii=False),
+    }
+    if servers:
+        settings["VIBE_MCP_SERVERS"] = json.dumps([
+            {"name": server["name"], "transport": server["transport"], "url": server["url"],
+             **({"auth": {"type": "static", "headers": server["headers"]}} if server["headers"] else {})}
+            for server in servers], ensure_ascii=False)
+    return settings
+
+
+def mcp_servers(request):
+    """The request's MCP tools, in the shape Vibe's config takes."""
+    servers = []
+    for tool in request.mcp_servers:
+        label, url = tool.get("server_label"), tool.get("server_url")
+        if not label or not url:
+            continue
+        name = re.sub(r"[^A-Za-z0-9_-]", "_", str(label)).strip("_-")[:256]
+        if not name:
+            continue
+        headers = tool.get("headers") if isinstance(tool.get("headers"), dict) else {}
+        servers.append({
+            "name": name,
+            # Vibe's `http` transport is the old SSE one; `streamable-http` the current one.
+            "transport": "http" if str(url).rstrip("/").endswith("/sse") else "streamable-http",
+            "url": str(url),
+            "headers": {str(key): str(value) for key, value in headers.items()},
+        })
+    return servers
+
+
+def effort_of(request):
+    effort = (request.effort or "").strip()
+    if not effort:
+        return None
+    return {"minimal": "low"}.get(effort, effort)
+
+
+def max_output_tokens_of(request):
+    value = request.body.get("max_output_tokens")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def number_of(request, name):
+    value = request.body.get(name)
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def command(session, instructions_path, export_dir):
+    args = [VIBE, "-p", "--output", "streaming", "--auto-approve", "--trust"]
+    if export_dir:
+        args += ["--output-dir", export_dir]
+    if session:
+        args += ["--resume", session]
+    if instructions_path:
+        args += ["--system-prompt-file", instructions_path]
+    return args
+
+
+def environment(settings):
+    env = dict(os.environ)
+    # The turn has no keyring. Vibe's headless startup would otherwise probe it for MISTRAL_API_KEY, which
+    # this package does not use; the provider key arrives in HG_PROVIDER_KEY.
+    env["VIBE_TEST_DISABLE_KEYRING"] = "1"
+    env.update(settings)
+    return env
+
+
+def plus(text):
+    return "".join(f"+{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def minus(text):
+    return "".join(f"-{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def as_text(value):
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+class Translator:
+    """Vibe's streaming history entries in, Responses events out."""
+
+    def __init__(self, emit, state, mcp_names):
+        self.emit = emit
+        self.state = state
+        self.session = None
+        self.answered = False          # an assistant message or a tool effect: the turn did something
+        self.spoke = False             # anything has been printed for the caller
+        self.mcp_names = mcp_names
+
+    def read(self, line):
+        if not line.strip():
+            return
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # not JSON: something it printed aside
+        if not isinstance(entry, dict):
+            return self.emit.log(line)
+
+        session = entry.get("sessionId")
+        if session and session != self.session:
+            self.session = session
+            self.state.set("session", session)                          # saved the moment it is known
+
+        kind = entry.get("type")
+        if kind == "message":
+            self.message(entry)
+        elif kind == "reasoning":
+            self.reasoning(entry)
+        elif kind == "effect":
+            self.effect(entry)
+        elif kind == "notice":
+            self.emit.log(str(entry.get("message") or json.dumps(entry, ensure_ascii=False)))
+        elif kind == "callback":
+            self.emit.log(f"Vibe asked for approval: {entry.get('title') or 'a tool call'}")
+        elif kind == "checkpoint":
+            self.emit.log(str(entry.get("message") or f"Vibe checkpoint: {entry.get('kind')}"))
+        else:
+            self.emit.log(json.dumps(entry, ensure_ascii=False))
+
+    def message(self, entry):
+        if entry.get("role") != "assistant":
+            return                                                      # the user's own message, echoed back
+        text = "\n\n".join(
+            block.get("text", "") for block in entry.get("content") or []
+            if isinstance(block, dict) and block.get("type") == "text")
+        if text:
+            self.emit.say(text)
+            self.spoke = True
+        self.answered = True
+
+    def reasoning(self, entry):
+        text = entry.get("text")
+        if not isinstance(text, str) or not text.strip():
+            text = "\n\n".join(summary for summary in entry.get("summary") or [] if isinstance(summary, str))
+        if not text.strip() or text.strip() == "[redacted]":
+            return                                                      # the provider withheld the reasoning
+        self.emit.think(text)
+        self.spoke = True
+
+    def effect(self, entry):
+        self.answered = True
+        detail = entry.get("detail") or {}
+        state = entry.get("state") or {}
+        tool = detail.get("toolName") or entry.get("title") or "tool"
+        given = detail.get("input")
+        output = state.get("output")
+        failed = state.get("status") != "completed"
+        error = (state.get("error") or {}).get("message") if isinstance(state.get("error"), dict) else None
+        shown = state.get("outputText") if isinstance(state.get("outputText"), str) else ""
+
+        kind = detail.get("kind")
+        if kind == "shell":
+            command = given.get("command", "") if isinstance(given, dict) else ""
+            stdout = output.get("stdout", "") if isinstance(output, dict) else ""
+            stderr = output.get("stderr", "") if isinstance(output, dict) else ""
+            if failed and not stderr:
+                stderr = error or shown
+            exit_code = 0 if not failed else 1
+            self.emit.ran(command, stdout=stdout or (shown if not failed else ""),
+                          stderr=stderr, exit_code=exit_code)
+        elif kind == "file_write":
+            self.write_file(tool, given, output, failed, error or shown)
+        elif kind == "file_edit":
+            self.edit_file(tool, given, failed, error or shown)
+        elif kind == "tool" and self.is_mcp(tool):
+            server, name = self.is_mcp(tool)
+            self.emit.called(server, name, given if given is not None else {},
+                             output=None if failed else (shown or as_text(output)),
+                             error=(error or shown or "the tool call failed") if failed else None)
+        else:
+            self.emit.used(tool, json.dumps(given, ensure_ascii=False) if given is not None else "",
+                           (error or shown or as_text(output)) if failed else (shown or as_text(output)))
+        self.spoke = True
+
+    def is_mcp(self, tool):
+        """The server and tool of an MCP tool call, from the name Vibe publishes it under.
+
+        Vibe offers MCP tools as `mcp_<server>.<tool>` (and older paths as `<server>_<tool>`).
+        """
+        for name in self.mcp_names:
+            for prefix in (f"mcp_{name}.", f"mcp_{name}_", f"{name}."):
+                if tool.startswith(prefix) and len(tool) > len(prefix):
+                    return name, tool[len(prefix):]
+            if tool.startswith(name + "_") and len(tool) > len(name) + 1:
+                return name, tool[len(name) + 1:]
+        return None
+
+    def write_file(self, tool, given, output, failed, said):
+        given = given if isinstance(given, dict) else {}
+        path = given.get("filePath") or given.get("file_path") or ""
+        content = given.get("content") or ""
+        if failed:
+            return self.emit.used(tool, json.dumps(given, ensure_ascii=False), said or "the write failed")
+        previous = output.get("previousContent") if isinstance(output, dict) else None
+        existed = bool(output.get("fileExisted")) if isinstance(output, dict) else False
+        if existed:
+            diff = (minus(previous) if isinstance(previous, str) else "") + plus(content)
+            self.emit.edited(path, diff[:DIFF_MAX])
+        else:
+            self.emit.wrote(path, plus(content))
+
+    def edit_file(self, tool, given, failed, said):
+        given = given if isinstance(given, dict) else {}
+        path = given.get("filePath") or given.get("file_path") or ""
+        changes = given.get("changes") or [given]
+        if failed:
+            return self.emit.used(tool, json.dumps(given, ensure_ascii=False), said or "the edit failed")
+        diff = "".join(minus(change.get("oldString") or change.get("old_string") or "")
+                       + plus(change.get("newString") or change.get("new_string") or "")
+                       for change in changes if isinstance(change, dict))
+        self.emit.edited(path, diff[:DIFF_MAX])
+
+
+def read_export(folder):
+    """What the CLI wrote about the run: its outcome, error, usage and session id. None when there is none."""
+    try:
+        with open(os.path.join(folder, "export.json"), encoding="utf-8") as file:
+            export = json.load(file)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(export, dict):
+        return None
+    usage = None
+    counted = export.get("usage")
+    if isinstance(counted, dict):
+        usage = {"input_tokens": int(counted.get("input_tokens") or 0),
+                 "output_tokens": int(counted.get("output_tokens") or 0)}
+        cached = counted.get("cached_input_tokens")
+        if isinstance(cached, int):
+            usage["input_tokens_details"] = {"cached_tokens": cached}
+    error = export.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    return {"outcome": export.get("outcome"), "message": message, "usage": usage,
+            "session": export.get("session_id") if isinstance(export.get("session_id"), str) else None}
+
+
+def missing_session(result):
+    """Whether the CLI refused the saved session id, rather than failing for another reason."""
+    if not result or result.get("outcome") not in ("usage_error", "config_error"):
+        return False
+    message = (result.get("message") or "").lower()
+    return "session not found" in message or "no session" in message
+
+
+def turn(emit, state, session, servers, brief, export_dir, instructions_path, settings):
+    cli = hgkit.Cli(command(session, instructions_path, export_dir), env=environment(settings), cwd=WORK,
+                    stdin=brief)
+    translator = Translator(emit, state, {server["name"] for server in servers})
+    for line in cli.lines():
+        translator.read(line)
+    return translator, cli.exit_code, (read_export(export_dir) if export_dir else None)
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    servers = mcp_servers(request)
+    settings = settings_env(dict(os.environ), servers, effort_of(request), max_output_tokens_of(request),
+                            number_of(request, "temperature"), number_of(request, "top_p"))
+
+    instructions_path = None
+    if request.instructions:
+        handle, instructions_path = tempfile.mkstemp(prefix="vibe-instructions-", suffix=".txt")
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            file.write(request.instructions)
+
+    brief = request.brief(instructions=False)
+    replaying = bool(os.environ.get("HG_REPLAY"))
+    session = state.get("session")
+    export_dir = None if replaying else tempfile.mkdtemp(prefix="vibe-export-")
+    try:
+        translator, code, result = turn(emit, state, session, servers, brief, export_dir, instructions_path,
+                                        settings)
+        if session and not translator.spoke and missing_session(result):
+            emit.log(f"Vibe could not resume session {session}: {result.get('message')}; starting a new one")
+            state.clear("session")
+            if export_dir:
+                shutil.rmtree(export_dir, ignore_errors=True)
+                export_dir = tempfile.mkdtemp(prefix="vibe-export-")
+            translator, code, result = turn(emit, state, None, servers, brief, export_dir, instructions_path,
+                                            settings)
+    except OSError as error:
+        # The install is missing or cannot be executed: say so rather than exit with no terminal line.
+        emit.failed("cli_exit", f"Mistral Vibe could not be started: {error}")
+        return
+    finally:
+        if instructions_path:
+            os.unlink(instructions_path)
+        if export_dir:
+            shutil.rmtree(export_dir, ignore_errors=True)
+
+    if result and result.get("session") and not state.get("session"):
+        state.set("session", result["session"])
+
+    usage = result.get("usage") if result else None
+    outcome = result.get("outcome") if result else None
+    message = (result.get("message") if result else None) or ""
+
+    if outcome == "finished":
+        emit.done(usage)
+    elif outcome == "length":
+        emit.incomplete("max_output_tokens", usage)
+    elif outcome:
+        code_name = {
+            "usage_error": "usage_error",
+            "config_error": "config_error",
+            "infrastructure_failure": "provider_error",
+            "refusal": "refusal",
+            "aborted": "aborted",
+            "turn_limit": "turn_limit",
+            "token_limit": "token_limit",
+            "price_limit": "price_limit",
+            "deadline": "deadline",
+            "terminated": "terminated",
+        }.get(outcome, "cli_error")
+        emit.failed(code_name, message or f"Mistral Vibe ended with the outcome {outcome!r}.", usage)
+    elif translator.answered:
+        # No export: a replay of a recording. What the recording shows is all there is to go on.
+        emit.done()
+    elif code != 0:
+        emit.failed("cli_exit", f"Mistral Vibe exited with code {code} without producing an answer.")
+    else:
+        emit.failed("cli_error", "Mistral Vibe ended without producing an answer; the turn log has its error.")
+
+
+if __name__ == "__main__":
+    main()

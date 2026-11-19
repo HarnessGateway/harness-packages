@@ -1,0 +1,12 @@
+{
+  "model": "builder/vibe/deepseek/deepseek-flash",
+  "input": "Use the demo_add tool with a=2 and b=3, then tell me the number it returned.",
+  "tools": [
+    {
+      "type": "mcp",
+      "server_label": "demo",
+      "server_url": "http://127.0.0.1:8123/mcp",
+      "server_description": "demo"
+    }
+  ]
+}

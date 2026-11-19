@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""One turn of Deep Agents Code (dcode), over the ACP server it ships (`dcode --acp`).
+
+`dcode --acp` speaks JSON-RPC 2.0 on standard input and output. It streams the agent's text and reasoning as
+`session/update` notifications, reports every tool call as `tool_call` and then `tool_call_update`, and answers
+`session/prompt` with a stop reason. That is the machine-readable shape this package translates; the CLI's
+plain `-n` mode writes human text to standard output and keeps tool activity out of it.
+
+The ACP session id is the CLI's LangGraph thread id. It is saved the moment the CLI reports it, and the next
+turn continues it with `session/load`. Token counts are not in the ACP stream; dcode records them in the
+session's SQLite checkpoint (`_session_cost_breakdown`), which the closed CLI leaves in the mind. They are read
+there, before and after the turn, and the difference is the turn's usage.
+"""
+
+from __future__ import annotations
+
+import collections
+import contextlib
+import ctypes
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+DCODE = os.path.join(os.environ["HG_HARNESS"], "tools", "bin", "dcode")
+TOOL_PYTHON = os.path.join(os.environ["HG_HARNESS"], "tools", "uv-tools", "deepagents-code", "bin", "python")
+DIFF_MAX = 100_000
+PROTOCOL_VERSION = 1
+
+_PR_SET_CHILD_SUBREAPER = 36
+
+# The provider APIs the manifest lists, and how dcode names the same provider and its variables.
+_LAUNCH = {
+    "anthropic": ("anthropic", {"ANTHROPIC_API_KEY": "key", "ANTHROPIC_BASE_URL": "url"}, {}),
+    "openai-chat": ("openai", {"OPENAI_API_KEY": "key", "OPENAI_BASE_URL": "url"}, {}),
+    "openai-responses": ("openai", {"OPENAI_API_KEY": "key", "OPENAI_BASE_URL": "url"},
+                         {"use_responses_api": True}),
+    "gemini": ("google_genai", {"GOOGLE_API_KEY": "key", "GOOGLE_GEMINI_BASE_URL": "url"}, {}),
+}
+
+
+def _keep_what_the_cli_starts() -> None:
+    """Have a process the CLI leaves running apart from itself stay below `run`, where a stop can reach it."""
+    with contextlib.suppress(OSError, AttributeError):
+        ctypes.CDLL(None).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+
+
+def _started_by_run() -> list[int]:
+    parents = {}
+    with contextlib.suppress(OSError):
+        for entry in filter(str.isdigit, os.listdir("/proc")):
+            with contextlib.suppress(OSError), open(f"/proc/{entry}/stat", encoding="utf-8") as file:
+                state, parent = file.read().rpartition(")")[2].split()[:2]
+                if state != "Z":
+                    parents[int(entry)] = int(parent)
+    found: list[int] = []
+    above = {os.getpid()}
+    while above:
+        above = {pid for pid, parent in parents.items() if parent in above}
+        found.extend(above)
+    return found
+
+
+# ── the CLI's environment and command ──────────────────────────────────────────────────────────────────────
+
+
+def environment() -> tuple[dict[str, str], str]:
+    """The CLI's whole environment and the provider:model spec it is launched with."""
+    env = dict(os.environ)
+    api = env.get("HG_PROVIDER_API", "")
+    if api not in _LAUNCH:
+        raise SystemExit(f"dcode does not speak the provider API {api!r}")
+    provider, variables, _ = _LAUNCH[api]
+    for name, which in variables.items():
+        env[name] = env["HG_PROVIDER_KEY"] if which == "key" else env["HG_PROVIDER_URL"]
+    env.update({
+        # The session store must live in the mind the platform saves, whatever the image's HOME looks like.
+        "DEEPAGENTS_HOME": os.path.join(env["HG_MIND"], ".deepagents"),
+        # Nothing the CLI does on its own account should leave the sandbox or wait on a host it cannot reach.
+        "DEEPAGENTS_CODE_NO_UPDATE_CHECK": "1",
+        "DEEPAGENTS_CODE_AUTO_UPDATE": "0",
+        "DEEPAGENTS_CODE_OFFLINE": "1",
+        # One colourless profile is all a headless turn wants.
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+    })
+    return env, f"{provider}:{env['HG_MODEL']}"
+
+
+def command(spec: str, api: str, mcp_config: str | None) -> list[str]:
+    args = [DCODE, "--acp", "--model", spec, "--no-tracing", "--shell-allow-list", "all"]
+    if mcp_config:
+        args += ["--mcp-config", mcp_config]
+    else:
+        args += ["--no-mcp"]
+    params = _LAUNCH[api][2]
+    if params:
+        args += ["--model-params", json.dumps(params)]
+    return args
+
+
+def mcp_config(request: hgkit.Request) -> str | None:
+    """The request's MCP tools as the Claude Desktop config file `--mcp-config` reads. In /tmp: this turn's
+    file, beside the CLI, not part of the session."""
+    servers = {}
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not (isinstance(label, str) and label and isinstance(url, str) and url):
+            continue
+        entry: dict[str, object] = {"type": "http", "url": url}
+        headers = server.get("headers")
+        if isinstance(headers, dict):
+            entry["headers"] = {str(name): str(value) for name, value in headers.items()}
+        servers[label] = entry
+    if not servers:
+        return None
+    path = os.path.join("/tmp", f"dcode-mcp-{os.getpid()}.json")
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump({"mcpServers": servers}, file)
+    return path
+
+
+# ── token usage, from the session database dcode leaves in the mind ───────────────────────────────────────
+
+_USAGE_READER = r"""
+import json, sys
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    with SqliteSaver.from_conn_string(sys.argv[1]) as saver:
+        found = saver.get_tuple({"configurable": {"thread_id": sys.argv[2]}})
+    values = found.checkpoint.get("channel_values", {}) if found is not None else {}
+    counted = values.get("_session_cost_breakdown") or {}
+    print(json.dumps({
+        "input_tokens": int(counted.get("input_tokens") or 0),
+        "output_tokens": int(counted.get("output_tokens") or 0),
+        "cached_tokens": int(counted.get("cache_read_tokens") or 0),
+    }))
+except Exception:
+    print("null")
+"""
+
+
+def usage_total(thread_id: str | None) -> dict[str, int] | None:
+    """The thread's cumulative token counts as dcode has recorded them, or None."""
+    if not thread_id:
+        return None
+    database = os.path.join(os.environ["HG_MIND"], ".deepagents", ".state", "sessions.db")
+    if not (os.path.exists(database) and os.path.exists(TOOL_PYTHON)):
+        return None
+    try:
+        done = subprocess.run(  # noqa: S603 - a path this package installed
+            [TOOL_PYTHON, "-I", "-c", _USAGE_READER, database, thread_id],
+            capture_output=True, text=True, timeout=30, check=False)
+        value = json.loads(done.stdout.strip() or "null")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def turn_usage(before: dict[str, int] | None, after: dict[str, int] | None) -> dict[str, object] | None:
+    """The difference the turn made, in the shape a Responses usage object has."""
+    if after is None:
+        return None
+    before = before or {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+    input_tokens = after["input_tokens"] - before["input_tokens"]
+    output_tokens = after["output_tokens"] - before["output_tokens"]
+    cached_tokens = after["cached_tokens"] - before["cached_tokens"]
+    if input_tokens < 0 or output_tokens < 0:       # compaction rewrote the history the total was kept over
+        input_tokens, output_tokens, cached_tokens = (after["input_tokens"], after["output_tokens"],
+                                                      after["cached_tokens"])
+    if not (input_tokens or output_tokens):
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "input_tokens_details": {"cached_tokens": max(0, cached_tokens)},
+    }
+
+
+# ── the ACP connection ─────────────────────────────────────────────────────────────────────────────────────
+
+
+class Acp:
+    """`dcode --acp` as a process, or its recording replayed in its place."""
+
+    def __init__(self, command_line: list[str], env: dict[str, str], cwd: str) -> None:
+        self._command = command_line
+        self._env = env
+        self._cwd = cwd
+        self._recording = env.get("HG_REPLAY")
+        self._record_to = env.get("HGKIT_RECORD")
+        self._process: subprocess.Popen[str] | None = None
+        self._iterator = None
+        self._stopped = False
+        self._stderr: collections.deque[str] = collections.deque(maxlen=400)
+
+    # a stopped turn
+
+    def _stop(self, *_: object) -> None:
+        self._stopped = True
+        self.terminate()
+        timer = threading.Timer(5.0, self.kill)
+        timer.daemon = True
+        timer.start()
+
+    def terminate(self) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        for pid in _started_by_run():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGTERM)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGTERM)
+
+    def kill(self) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        for pid in _started_by_run():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    def close(self) -> None:
+        """End a CLI that has answered: it is not needed again this turn."""
+        process = self._process
+        if process is None:
+            return
+        with contextlib.suppress(OSError):
+            if process.stdin is not None:
+                process.stdin.close()
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5)
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    @property
+    def exit_code(self) -> int | None:
+        return None if self._process is None else self._process.poll()
+
+    def stderr_tail(self) -> str:
+        return "".join(self._stderr).strip()[-2000:]
+
+    # the lines
+
+    def start(self) -> None:
+        if self._recording:
+            return
+        _keep_what_the_cli_starts()
+        self._process = subprocess.Popen(  # noqa: S603 - a path this package installed
+            self._command, env=dict(self._env), cwd=self._cwd, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+            bufsize=1, start_new_session=True)
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, self._stop)
+
+    def _drain_stderr(self) -> None:
+        assert self._process is not None and self._process.stderr is not None
+        for line in self._process.stderr:
+            self._stderr.append(line)
+            sys.stderr.write(line)                 # the turn's log; the caller never sees it
+            sys.stderr.flush()
+
+    def send(self, message: dict[str, object]) -> None:
+        if self._recording or self._process is None or self._process.stdin is None:
+            return
+        with contextlib.suppress(BrokenPipeError, ValueError):
+            self._process.stdin.write(json.dumps(message) + "\n")
+            self._process.stdin.flush()
+
+    def lines(self):
+        """The CLI's lines, once, from wherever the last read stopped: responses and notifications arrive in
+        one stream, and a recording is that same stream read from its start to its end.
+
+        This returns the one iterator rather than wrapping it: a wrapping generator would close the stream
+        when the caller stops reading it at a response, and the next read would begin after the end.
+        """
+        if self._iterator is None:
+            self._iterator = self._read_lines()
+        return self._iterator
+
+    def _read_lines(self):
+        if self._recording:
+            with open(self._recording, encoding="utf-8") as file:
+                for line in file:
+                    yield line.rstrip("\n")
+            return
+        assert self._process is not None and self._process.stdout is not None
+        record = open(self._record_to, "a", encoding="utf-8") if self._record_to else None  # noqa: SIM115
+        try:
+            for line in self._process.stdout:
+                if record is not None:
+                    record.write(line)
+                    record.flush()
+                yield line.rstrip("\n")
+        finally:
+            if record is not None:
+                record.close()
+
+
+class Client:
+    """The client half of ACP: requests out, responses and updates in."""
+
+    def __init__(self, acp: Acp, emit: hgkit.Emitter, state: hgkit.State,
+                 on_update) -> None:                    # on_update: translator's method
+        self._acp = acp
+        self._emit = emit
+        self._state = state
+        self._on_update = on_update
+        self._next_id = 0
+        self.session: str | None = None
+        self.stopped_early = False
+
+    def _request(self, method: str, params: dict[str, object]) -> int:
+        self._next_id += 1
+        self._acp.send({"jsonrpc": "2.0", "id": self._next_id, "method": method, "params": params})
+        return self._next_id
+
+    def _answer(self, message: dict[str, object]) -> None:
+        """A request the server makes of the client: permission is approved, as a headless turn must."""
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        choices = params.get("options") if isinstance(params.get("options"), list) else []
+        chosen = next((item.get("optionId") for item in choices if isinstance(item, dict)
+                       and item.get("optionId") in ("approve", "approve_always")), None)
+        if message.get("method") == "session/request_permission":
+            self._acp.send({"jsonrpc": "2.0", "id": message.get("id"), "result": {
+                "outcome": {"outcome": "selected", "optionId": chosen or "approve"}}})
+        elif "id" in message:
+            self._acp.send({"jsonrpc": "2.0", "id": message.get("id"), "result": {}})
+
+    def wait(self, wanted: int, process_updates: bool) -> dict[str, object] | None:
+        """Read until the response to `wanted`. Notifications before it are translated when asked, or dropped."""
+        for raw in self._acp.lines():
+            if self._acp.stopped:
+                self.stopped_early = True
+                return None
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                if raw.strip():
+                    self._emit.log(raw)
+                continue
+            if not isinstance(message, dict):
+                continue
+            if "method" in message:
+                if "id" in message:
+                    self._answer(message)
+                elif process_updates and message.get("method") == "session/update":
+                    self._update(message)
+                elif process_updates:
+                    self._emit.log(json.dumps(message)[:2000])
+                else:
+                    self._remember_session(message)
+                continue
+            if message.get("id") == wanted:
+                return message
+        return None
+
+    def _update(self, message: dict[str, object]) -> None:
+        params = message.get("params")
+        if not isinstance(params, dict):
+            return
+        if isinstance(params.get("sessionId"), str):
+            self.session = params["sessionId"]
+        update = params.get("update")
+        if isinstance(update, dict):
+            self._on_update(update)
+
+    def _remember_session(self, message: dict[str, object]) -> None:
+        """A dropped replay update still names the session the recording belongs to."""
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        if isinstance(params.get("sessionId"), str):
+            self.session = params["sessionId"]
+
+    def save_session(self, session_id: str) -> None:
+        self.session = session_id
+        self._state.set("session", session_id)         # the moment it is known, not at the end
+
+    # the three steps
+
+    def initialize(self) -> dict[str, object] | None:
+        wanted = self._request("initialize", {
+            "protocolVersion": PROTOCOL_VERSION,
+            "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+            "clientInfo": {"name": "harnessgateway", "version": os.environ.get("HG_HARNESS_VERSION", "1")},
+        })
+        return self.wait(wanted, process_updates=False)
+
+    def open_session(self, resume: str | None, mcp_servers: list[dict[str, object]]) -> dict[str, object] | None:
+        if resume:
+            wanted = self._request("session/load", {"cwd": os.environ["HG_WORK"], "sessionId": resume,
+                                                    "mcpServers": mcp_servers})
+            answer = self.wait(wanted, process_updates=False)   # the replay is not this turn's output
+            if answer is None or "error" in answer:
+                self._emit.log(f"dcode could not resume session {resume}; starting a new one")
+                self._state.clear("session")
+                self.session = None
+                return self.new_session(mcp_servers)
+            self.session = resume
+            return answer
+        return self.new_session(mcp_servers)
+
+    def new_session(self, mcp_servers: list[dict[str, object]]) -> dict[str, object] | None:
+        wanted = self._request("session/new", {"cwd": os.environ["HG_WORK"], "mcpServers": mcp_servers})
+        answer = self.wait(wanted, process_updates=False)
+        if answer is not None and "error" not in answer:
+            result = answer.get("result")
+            if isinstance(result, dict) and isinstance(result.get("sessionId"), str):
+                self.save_session(result["sessionId"])
+            elif self.session is None:
+                # A recording of a resumed turn answers session/new's place with a load result; its updates
+                # named the session, and `wait` kept it.
+                pass
+        return answer
+
+    def prompt(self, text: str) -> dict[str, object] | None:
+        wanted = self._request("session/prompt", {
+            "sessionId": self.session or "", "prompt": [{"type": "text", "text": text}]})
+        return self.wait(wanted, process_updates=True)
+
+
+# ── dcode's tool calls, in Responses events ────────────────────────────────────────────────────────────────
+
+
+def _text_of(content: object) -> str:
+    if isinstance(content, dict) and content.get("type") == "text":
+        return str(content.get("text") or "")
+    if isinstance(content, list):
+        return "".join(_text_of(item) for item in content)
+    return ""
+
+
+def _result_text(update: dict[str, object]) -> str:
+    """The text of a tool_call_update's content list."""
+    text = []
+    for item in update.get("content") or []:
+        if isinstance(item, dict):
+            text.append(_text_of(item.get("content")))
+    return "".join(text)
+
+
+def _diff_of(text: object, mark: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def _display_path(path: str) -> str:
+    """The path as the caller sees it: relative when it is inside the work folder. A recording made in another
+    work folder names the file after its last `work/`, so a replayed case reads the same way a live one does."""
+    work = os.environ.get("HG_WORK", "")
+    if not path:
+        return path
+    if work:
+        try:
+            relative = os.path.relpath(path, work)
+        except ValueError:
+            relative = ""
+        if relative and not relative.startswith(".."):
+            return relative
+    marker = os.sep + os.path.basename(work or "work") + os.sep
+    if os.path.isabs(path) and marker in path:
+        return path.rsplit(marker, 1)[1]
+    return path
+
+
+_EXIT = re.compile(r"exit code (-?\d+)")
+_OUTPUT = re.compile(r"\*\*Output:\*\*\s*(?:```[^\n]*\n(.*?)\n```|_\(empty\)_)", re.S)
+_STATUS = re.compile(r"\*\*Status:\*\*\s*(.*)")
+
+
+def _execute_result(text: str) -> tuple[str, int]:
+    """The output and exit code `format_execute_result` wrapped in Markdown."""
+    output = _OUTPUT.search(text)
+    stdout = output.group(1) if output and output.group(1) is not None else ""
+    code = 0
+    status = _STATUS.search(text)
+    if status:
+        said = status.group(1).strip()
+        counted = _EXIT.search(said)
+        if counted:
+            code = int(counted.group(1))
+        elif "timed out" in said.lower() or "timeout" in said.lower():
+            code = 124
+        elif "succeed" not in said.lower():
+            code = 1
+    return stdout, code
+
+
+class Translator:
+    """`session/update` in, Responses events out: the tool call is kept until its result arrives."""
+
+    def __init__(self, emit: hgkit.Emitter) -> None:
+        self.emit = emit
+        self.calls: dict[str, dict[str, object]] = {}
+
+    def __call__(self, update: dict[str, object]) -> None:
+        kind = update.get("sessionUpdate")
+        if kind == "agent_message_chunk":
+            self.emit.say(_text_of(update.get("content")))
+        elif kind == "agent_thought_chunk":
+            self.emit.think(_text_of(update.get("content")))
+        elif kind == "user_message_chunk":
+            pass
+        elif kind == "tool_call":
+            call_id = update.get("toolCallId")
+            if isinstance(call_id, str):
+                given = update.get("rawInput") if isinstance(update.get("rawInput"), dict) else {}
+                diff = given.get("content")
+                if update.get("kind") == "edit" and isinstance(diff, dict) and diff.get("type") == "diff":
+                    # deepagents-acp never sends a completion for edit_file: the start already carries the
+                    # diff, and the server skips the result update for it. Report the edit now; a late
+                    # completion, should one come, is ignored.
+                    self.finish({**update, "status": "completed"})
+                    self.calls[call_id] = {"_emitted": True}
+                else:
+                    self.calls[call_id] = dict(update)
+        elif kind == "tool_call_update":
+            self.finish(update)
+        elif kind in ("plan", "plan_update", "plan_removed", "available_commands_update",
+                      "current_mode_update", "config_option_update", "session_info_update", "notice",
+                      "compaction_update", "compaction_summary_chunk", "usage_update"):
+            self.emit.log(json.dumps(update)[:2000])
+        elif kind:
+            self.emit.log(json.dumps(update)[:2000])
+
+    def finish(self, update: dict[str, object]) -> None:
+        status = update.get("status")
+        if status not in ("completed", "failed"):
+            return
+        call_id = update.get("toolCallId")
+        started = self.calls.pop(call_id, None) if isinstance(call_id, str) else None
+        if started is not None and started.get("_emitted"):
+            return
+        if started is None:
+            started = {}
+        call = {**started, **{key: value for key, value in update.items() if value is not None}}
+        failed = status == "failed"
+        given = call.get("rawInput") if isinstance(call.get("rawInput"), dict) else {}
+        title = str(call.get("title") or "")
+        kind = call.get("kind")
+        text = _result_text(call)
+
+        if kind == "execute":
+            command = given.get("command") if isinstance(given.get("command"), str) else title
+            stdout, code = _execute_result(text)
+            if failed and not code:
+                code = 1
+            self.emit.ran(command, stdout=stdout, stderr="", exit_code=code)
+        elif kind == "edit":
+            path = self._path_of(call, given)
+            if isinstance(given.get("content"), str):
+                self.emit.wrote(path, _diff_of(given["content"], "+"))
+            elif self._edit_text(given):
+                old, new = self._edit_text(given)
+                self.emit.edited(path, _diff_of(old, "-") + _diff_of(new, "+"))
+            elif title.startswith("Write"):
+                self.emit.wrote(path, "")
+            elif path:
+                self.emit.edited(path, "")
+        elif kind == "delete":
+            path = self._path_of(call, given)
+            if path:
+                self.emit.deleted(path)
+        else:
+            name = title
+            read = re.fullmatch(r"Read `(.+)`", title)
+            if read:
+                name = "read_file"
+            self.emit.used(name or "tool", json.dumps(given, ensure_ascii=False), text)
+
+    @staticmethod
+    def _path_of(call: dict[str, object], given: dict[str, object]) -> str:
+        path = ""
+        for value in (given.get("file_path"), given.get("path"), call.get("title")):
+            if isinstance(value, str):
+                found = re.search(r"`([^`]+)`", value) if "`" in value else None
+                path = found.group(1) if found else value
+                break
+        else:
+            for location in call.get("locations") or []:
+                if isinstance(location, dict) and isinstance(location.get("path"), str):
+                    path = location["path"]
+                    break
+        return _display_path(path)
+
+    @staticmethod
+    def _edit_text(given: dict[str, object]) -> tuple[str, str] | None:
+        old, new = given.get("old_string"), given.get("new_string")
+        if isinstance(old, str) and isinstance(new, str):
+            return old, new
+        diff = given.get("content")
+        if isinstance(diff, dict) and diff.get("type") == "diff":
+            return str(diff.get("oldText") or ""), str(diff.get("newText") or "")
+        return None
+
+
+# ── one turn ──────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    try:
+        env, spec = environment()
+    except SystemExit as error:
+        emit.failed("configuration", str(error))
+        return
+    recording = env.get("HG_REPLAY")
+    translator = Translator(emit)
+    if request.effort:
+        emit.log(f"dcode does not take the request's reasoning.effort ({request.effort}); "
+                 "its effort/thinking setting comes from its own configuration")
+    text = request.body.get("text")
+    if isinstance(text, dict) and isinstance(text.get("format"), dict):
+        emit.log("dcode has no structured-output option in ACP mode; the request's text.format is not applied")
+
+    saved = state.get("session")
+    before = None if recording else usage_total(saved)
+
+    config = mcp_config(request)
+    acp = Acp(command(spec, env["HG_PROVIDER_API"], config), env, os.environ["HG_WORK"])
+    client = Client(acp, emit, state, translator)
+    acp.start()
+    try:
+        answer = client.initialize()
+        if client.stopped_early or acp.stopped:
+            return
+        if answer is None or "error" in answer:
+            detail = acp.stderr_tail() or "dcode did not answer the ACP handshake"
+            emit.failed("cli_start", f"dcode could not start its ACP server: {detail}")
+            return
+
+        # dcode's prebuilt agent takes its MCP servers from --mcp-config, not from ACP's session list.
+        answer = client.open_session(saved, [])
+        if client.stopped_early or acp.stopped:
+            return
+        if answer is None or "error" in answer:
+            error = (answer or {}).get("error") if isinstance(answer, dict) else None
+            emit.failed("session_error", _error_message(error) or "dcode could not open a session")
+            return
+        if saved and client.session == saved:
+            pass                                    # resumed: the baseline was read before the CLI started
+        elif client.session:
+            before = None if recording else usage_total(client.session)   # a new session counts from zero
+
+        answer = client.prompt(request.brief())
+        if client.stopped_early or acp.stopped:
+            return
+        if answer is None:
+            code = acp.exit_code
+            detail = acp.stderr_tail()
+            emit.failed("cli_exit", f"dcode exited (code {code}) before answering this turn"
+                                    + (f": {detail}" if detail else ""))
+            return
+        if "error" in answer:
+            acp.close()
+            usage = None if recording else turn_usage(before, usage_total(client.session))
+            emit.failed("provider_error", _error_message(answer.get("error")), usage)
+            return
+
+        result = answer.get("result") if isinstance(answer.get("result"), dict) else {}
+        stop = result.get("stopReason")
+        acp.close()                                 # the database is quiet when it is read
+        usage = None if recording else turn_usage(before, usage_total(client.session))
+        if stop == "max_tokens":
+            emit.incomplete("max_output_tokens", usage)
+        elif stop == "cancelled":
+            emit.failed("cancelled", "dcode cancelled the turn.", usage)
+        elif stop == "refusal":
+            emit.failed("refusal", "The model refused this request.", usage)
+        elif stop == "max_turn_requests":
+            emit.failed("max_turns", "dcode reached the turn limit for this request.", usage)
+        elif stop and stop != "end_turn":
+            emit.failed("stopped", f"dcode stopped with {stop}.", usage)
+        else:
+            emit.done(usage)
+    finally:
+        acp.close()
+        if config:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(config)
+
+
+def _error_message(error: object) -> str:
+    if not isinstance(error, dict):
+        return ""
+    data = error.get("data")
+    if isinstance(data, dict) and data.get("details"):
+        return str(data["details"])[:2000]
+    return str(error.get("message") or error)[:2000]
+
+
+if __name__ == "__main__":
+    main()

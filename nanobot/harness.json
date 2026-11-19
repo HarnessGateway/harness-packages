@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "nanobot",
+  "version": "0.4.1-1",
+  "description": "nanobot, unmodified, run through its makers' Python SDK.",
+  "mind": ".nanobot",
+  "cache": [".nanobot/cache"],
+  "apis": ["openai-chat", "openai-responses", "anthropic"],
+  "install": { "timeout_s": 1200 },
+  "run": { "stop_grace_s": 15 }
+}

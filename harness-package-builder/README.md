@@ -29,7 +29,7 @@ refused.
 
 | | |
 |---|---|
-| `install` | `claude-code`'s, then the platform's own package checker (`harnessgateway package check`) in a Python environment under `tools/platform`. Needs Python 3.12 or later in the image; the default image has it. |
+| `install` | `claude-code`'s, then the package checker of the platform that runs it (`harnessgateway package check`), from the wheel the platform puts beside the kit, in a Python environment under `tools/platform`. Needs HarnessGateway 4.3 or later, and Python 3.12 or later in the image; the default image has it. |
 | `run` | `claude-code`'s, byte for byte |
 | `guide/BUILDER.md` | How the builder works: the two kinds of package, the steps, what must hold before it hands over |
 | `guide/packages.md` | The package contract: the manifest, `install`, `run`, what a turn is given, sessions, secrets, tests |

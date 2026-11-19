@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "docker-agent",
+  "version": "1.161.0-1",
+  "description": "Docker Agent, unmodified.",
+  "mind": ".cagent",
+  "cache": [".cagent/cache"],
+  "apis": ["anthropic", "openai-responses", "openai-chat", "gemini"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}

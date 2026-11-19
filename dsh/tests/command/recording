@@ -1,0 +1,18 @@
+{"type":"session","sessionId":"session-6dd0b32b-e902-4129-862a-cce44cc47d3e","cwd":"/work/.trial/dsh/work"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"thinking","text":"Simple task: write hello.py, run it."}
+{"type":"tool_call","callId":"call_00_3l2hxHpq1AxlhSwzNasY5570","tool":"write","input":{"file_path":"/work/.trial/dsh/work/hello.py","content":"print(\"hello\")\n"}}
+{"type":"tool_result","callId":"call_00_3l2hxHpq1AxlhSwzNasY5570","status":"completed","result":"<path>/work/.trial/dsh/work/hello.py</path>\n<type>file</type>\n<content>\nCreated file\n</content>"}
+{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":380,"outputTokens":77,"cacheReadTokens":5504,"cacheWriteTokens":0,"totalTokens":5961}}
+{"type":"status","phase":"step_start","turn":1,"step":2}
+{"type":"thinking","text":""}
+{"type":"tool_call","callId":"call_00_ET_Mtc7KQprEWXBwLP24bAs1369","tool":"bash","input":{"command":"python3 hello.py","description":"Run hello.py"}}
+{"type":"tool_result","callId":"call_00_ET_Mtc7KQprEWXBwLP24bAs1369","status":"completed","result":"hello\n"}
+{"type":"status","phase":"step_end","turn":1,"step":2,"usage":{"inputTokens":243,"outputTokens":58,"cacheReadTokens":5760,"cacheWriteTokens":0,"totalTokens":6061}}
+{"type":"status","phase":"step_start","turn":1,"step":3}
+{"type":"thinking","text":""}
+{"type":"text","text":"Done. Created `hello.py` containing `print(\"hello\")` and ran it with `python3 hello.py`, which printed:\n\n```\nhello\n```"}
+{"type":"status","phase":"step_end","turn":1,"step":3,"usage":{"inputTokens":187,"outputTokens":32,"cacheReadTokens":5888,"cacheWriteTokens":0,"totalTokens":6107}}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"completed"}}
+{"type":"final","sessionId":"session-6dd0b32b-e902-4129-862a-cce44cc47d3e","reason":{"kind":"completed"},"text":"Done. Created `hello.py` containing `print(\"hello\")` and ran it with `python3 hello.py`, which printed:\n\n```\nhello\n```"}

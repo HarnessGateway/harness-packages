@@ -1,0 +1,39 @@
+#!/bin/sh
+# Installs Docker Agent at a pinned version under $HG_HARNESS/tools, by its makers' documented method: the
+# standalone binary from GitHub Releases (docker.github.io/docker-agent/getting-started/installation).
+set -eu
+VERSION=1.161.0
+
+command -v curl >/dev/null 2>&1 || {
+  echo "this image has no curl: Docker Agent is installed from its GitHub release with curl" >&2
+  exit 1
+}
+
+# Makers publish one asset per operating system and machine: docker-agent-linux-amd64, -arm64, and so on.
+# The machine is asked which one it is; no single build is named here, and an unknown one is a plain message.
+case "$(uname -s)" in
+  Linux) ;;
+  *) echo "Docker Agent's release assets are built for Linux here, and this image is $(uname -s)" >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64) asset=docker-agent-linux-amd64 ;;
+  aarch64|arm64) asset=docker-agent-linux-arm64 ;;
+  *) echo "this machine's architecture ($(uname -m)) has no Docker Agent release asset" >&2; exit 1 ;;
+esac
+
+mkdir -p "$HG_HARNESS/tools"
+url="https://github.com/docker/docker-agent/releases/download/v$VERSION/$asset"
+curl -fsSL --retry 3 --retry-delay 2 -o "$HG_HARNESS/tools/docker-agent" "$url" || {
+  echo "could not download $url" >&2
+  exit 1
+}
+chmod 0755 "$HG_HARNESS/tools/docker-agent"
+
+got=$(TELEMETRY_ENABLED=false DOCKER_AGENT_AUTO_UPDATE=0 DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1 \
+  "$HG_HARNESS/tools/docker-agent" version \
+  | awk '/^docker-agent version / {print $3; exit}')
+[ "$got" = "v$VERSION" ] || {
+  echo "installed Docker Agent ${got:-with no readable version}, wanted v$VERSION" >&2
+  exit 1
+}
+echo "Docker Agent $got installed"

@@ -13,7 +13,7 @@ One message, numbered, each with the answer you would pick. Skip what the reques
 | What is the agent for, and what does a typical request look like? | The instructions; the tools; the hosts |
 | Who calls it, and how must it answer (prose, files in the work folder, JSON)? | The instructions; the README |
 | Which CLI? (or: recommend one for this provider and purpose) | `install`, `run`, `apis` |
-| What must it reach: repositories, internal services, MCP servers? | `run.egress`; `secrets` bound to those hosts |
+| What must it reach: repositories, internal services, MCP servers? | The README's list of hosts an environment must allow; `secrets` bound to those hosts |
 | What must it never do: paths, commands, hosts, kinds of change? | The CLI's own permission rules and hooks |
 | What should an operator change without editing the package? | `settings`, `secrets` |
 
@@ -35,11 +35,18 @@ So:
   option naming a file under `$HG_HARNESS` (a settings file, an MCP configuration, a system prompt), or by a
   variable. The agent cannot edit it, and an upgrade reaches every session.
 - **What the agent may keep and grow goes in `seeds/mind/`:** starting notes, a memory file, skills it may
-  extend. Call `hgkit.seed_mind()` at the start of `run`.
+  extend. Call `hgkit.seed()` at the start of `run`.
 
 When a CLI will only read a rule from its own folder under `$HOME`, have `run` write that file from the
 package's copy at the start of every turn, and say in the README that the agent could change it during a
 turn and that it is put back at the next.
+
+Some CLIs read their instructions only from the folder they run in (an `AGENTS.md` there, say). For those
+there is `seeds/work/`, copied into the work folder the same way: once, never over a file that is there.
+Use it only when the CLI offers no option, variable or home-folder file for the same thing. The work folder
+is the session's, not the harness's: the caller sees the file among the session's files and may have sent
+one of the same name, the agent can change it, and another harness that works on the session reads it too.
+Say so in the README.
 
 | Layer | Mechanism | Who enforces it |
 |---|---|---|
@@ -47,7 +54,7 @@ turn and that it is put back at the next.
 | Which tools, commands and paths | The CLI's own permission rules and pre-tool hooks, from files in the package | The CLI, before each tool call |
 | MCP servers, and which of their tools | The CLI's MCP configuration, written by `run`: the package's own servers, then the request's (`request.mcp_servers`) | The CLI |
 | Credentials | `secrets` in the manifest, each bound to hosts | The platform's proxy: placeholders inside, real values only toward those hosts |
-| Which hosts at all | `run.egress`, and the hosts of its secrets | The proxy, outside the sandbox |
+| Which hosts at all | The environment's network, never the package: the README says what to allow | The proxy, outside the sandbox |
 | What the operator sets | `settings`: variables in the turn | `run` passes them to the CLI |
 | Provider and model | Named in the request (`environment/harness/provider/model`) | The platform |
 | Time, CPU, memory, disk, image | The environment the request names, which must carry the harness | The platform |
@@ -90,6 +97,13 @@ only what the package enforces, and the person decides whether the outer fence i
 - A token for an MCP server or an API: a **secret**, bound to that host. The turn gets a placeholder in the
   variable; put the variable's value where the token goes (a header in the MCP configuration, an
   `Authorization` header the agent is told to send). The proxy swaps it in toward the bound hosts only.
+
+A stdio MCP server is a process the CLI starts, and most CLIs give it only the variables its configuration
+block names. Without the proxy's address and certificate it reaches nothing, and fails in ways that look like
+the server's own fault. `hgkit.outbound()` is those variables as a dict: merge it into the server's `env`
+when `run` writes the configuration, every turn, since the address is the turn's own. (Some CLIs take a list
+of variable names to pass through instead: name the keys of `hgkit.outbound()`.) Try one MCP call under
+`trial.py` before the package is done; the trial's host list shows whether the server got out.
 
 The organization sets both on the installed harness: in the console on the harness's page, or
 `PATCH /v1/harnesses/<name>` with `{"settings": {…}}` and `{"secrets": {…}}`. Never put a value in the

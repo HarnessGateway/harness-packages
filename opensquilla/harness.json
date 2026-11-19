@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "opensquilla",
+  "version": "0.5.8-1",
+  "description": "OpenSquilla, unmodified.",
+  "mind": ".opensquilla",
+  "cache": [".opensquilla/cache", ".opensquilla/logs"],
+  "apis": ["openai-chat", "anthropic", "openai-responses", "gemini"],
+  "install": { "timeout_s": 1800 },
+  "run": { "stop_grace_s": 15 }
+}

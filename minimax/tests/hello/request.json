@@ -1,0 +1,4 @@
+{
+  "model": "builder/minimax/deepseek/deepseek-flash",
+  "input": "Say hello."
+}

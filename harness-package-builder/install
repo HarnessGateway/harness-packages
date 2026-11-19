@@ -20,17 +20,18 @@ got=$("$HG_HARNESS/tools/node_modules/.bin/claude" --version | awk '{print $1}')
 [ "$got" = "$VERSION" ] || { echo "installed Claude Code $got, wanted $VERSION" >&2; exit 1; }
 echo "Claude Code $got installed"
 
-# The builder checks the packages it writes with the platform's own checker (`harnessgateway package check`).
-# The platform is a Python program; it gets an environment of its own here.
-PLATFORM=4.1.3
+# The builder checks the packages it writes with the platform's own checker (`harnessgateway package check`):
+# the platform that runs this install, which it puts beside the kit as a wheel. Never a version chosen here, or
+# the builder would be told one contract and check against another. It gets a Python environment of its own.
+wheel=$(ls "$HG_HARNESS"/kit/harnessgateway-*.whl 2>/dev/null | head -n 1)
+[ -n "$wheel" ] || {
+  echo "this platform put no wheel of itself in $HG_HARNESS/kit: the builder needs HarnessGateway 4.3 or later" >&2
+  exit 1
+}
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || {
   echo "this image's python3 is older than 3.12, which the platform's package checker needs" >&2
   exit 1
 }
 python3 -m venv "$HG_HARNESS/tools/platform"
-"$HG_HARNESS/tools/platform/bin/pip" install --quiet --disable-pip-version-check \
-  "https://github.com/HarnessGateway/harnessgateway/archive/refs/tags/v$PLATFORM.tar.gz"
-
-got=$("$HG_HARNESS/tools/platform/bin/harnessgateway" version)
-[ "$got" = "$PLATFORM" ] || { echo "installed the platform's checker at $got, wanted $PLATFORM" >&2; exit 1; }
-echo "the package checker of HarnessGateway $got installed"
+"$HG_HARNESS/tools/platform/bin/pip" install --quiet --disable-pip-version-check "$wheel"
+echo "the package checker of HarnessGateway $("$HG_HARNESS/tools/platform/bin/harnessgateway" version) installed"

@@ -1,0 +1,91 @@
+#!/bin/sh
+# Installs Deep Agents Code (dcode) at the pinned version, as its makers document it: the PyPI package in a
+# uv-managed, isolated Python 3.14 tool environment under $HG_HARNESS/tools.
+#
+# uv itself comes from PyPI rather than astral.sh's installer: the installer downloads the uv binary from
+# releases.astral.sh, which is not one of the package-manager hosts an install is guaranteed; PyPI is. uv then
+# provisions Python 3.14 from GitHub release assets when the image has none, also a guaranteed host.
+#
+# agent-client-protocol is held below 1.0: deepagents-acp 0.0.13 (required by deepagents-code 0.2.10) imports
+# acp.audio_block, which 1.0.0 no longer exports, and without it `dcode --acp` refuses to start. 0.12.1 is
+# within deepagents-acp's declared range (>=0.10.1) and is the newest release that works. The CLI version
+# itself stays exactly the one pinned here.
+set -eu
+
+VERSION=0.2.10
+ACP_VERSION=0.12.1
+UV_VERSION=0.13.9
+
+for need in python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: it is needed to install dcode" >&2
+    exit 1
+  }
+done
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))' || {
+  echo "this image's python3 is older than 3.8, which the installer of dcode needs" >&2
+  exit 1
+}
+
+TOOLS="$HG_HARNESS/tools"
+mkdir -p "$TOOLS"
+
+# Everything uv needs to write stays under the harness: its tool environment, the Python it provisions when
+# the image has no 3.14, and its download cache (removed after the install).
+export UV_TOOL_DIR="$TOOLS/uv-tools"
+export UV_TOOL_BIN_DIR="$TOOLS/bin"
+export UV_PYTHON_INSTALL_DIR="$TOOLS/uv-python"
+export UV_CACHE_DIR="$TOOLS/uv-cache"
+export UV_NO_CONFIG=1
+export UV_NO_MODIFY_PATH=1
+export PIP_CACHE_DIR="$TOOLS/pip-cache"
+
+UV="$TOOLS/uv-venv/bin/uv"
+if [ ! -x "$UV" ]; then
+  python3 -m venv "$TOOLS/uv-venv" >&2 || {
+    echo "could not create a Python environment for uv under $TOOLS" >&2
+    exit 1
+  }
+  "$TOOLS/uv-venv/bin/pip" install --quiet --disable-pip-version-check "uv==$UV_VERSION" >&2 || {
+    echo "could not install uv $UV_VERSION from PyPI" >&2
+    exit 1
+  }
+fi
+
+"$UV" tool install --python 3.14 --with "agent-client-protocol==$ACP_VERSION" "deepagents-code==$VERSION" >&2 || {
+  echo "uv could not install deepagents-code $VERSION" >&2
+  exit 1
+}
+
+DCODE="$TOOLS/bin/dcode"
+[ -x "$DCODE" ] || { echo "deepagents-code was installed without a dcode executable" >&2; exit 1; }
+
+got=$("$DCODE" --version 2>/dev/null | head -n 1 | awk '{print $2}')
+[ "$got" = "$VERSION" ] || { echo "installed deepagents-code '$got', wanted $VERSION" >&2; exit 1; }
+
+# The CLI's own optional tool: ripgrep. It uses the system's when one is present and otherwise fetches the
+# pinned build into its tool environment. A failure here only means its grep uses the slower fallback.
+DEEPAGENTS_CODE_NO_UPDATE_CHECK=1 "$DCODE" tools install 1>&2 || \
+  echo "note: ripgrep was not provisioned; dcode's grep will use its slower fallback" >&2
+
+PYTHON="$UV_TOOL_DIR/deepagents-code/bin/python"
+[ -x "$PYTHON" ] || { echo "the installed dcode has no Python at $PYTHON" >&2; exit 1; }
+"$PYTHON" - "$ACP_VERSION" <<'PY' || { echo "the ACP dependency is not the version dcode 0.2.10 needs" >&2; exit 1; }
+import importlib.metadata as metadata
+import sys
+
+import acp
+
+want = sys.argv[1]
+got = metadata.version("agent-client-protocol")
+if got != want:
+    raise SystemExit(f"agent-client-protocol {got}, wanted {want}")
+if not hasattr(acp, "audio_block"):
+    raise SystemExit("this agent-client-protocol has no audio_block, which deepagents-acp 0.0.13 imports")
+PY
+
+# The download caches are not needed after the tool environment is built, and they should not sit in the
+# image.
+rm -rf "$UV_CACHE_DIR" "$PIP_CACHE_DIR"
+
+echo "dcode $got installed (agent-client-protocol $ACP_VERSION)"

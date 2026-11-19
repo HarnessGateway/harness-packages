@@ -1,0 +1,13 @@
+{"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "in_progress", "content": []}}
+{"type": "response.content_part.added", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}
+{"type": "response.output_text.delta", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "delta": "It printed `hello` \u2014 a single line, followed by a newline, then exit code 0.", "logprobs": []}
+{"type": "response.output_text.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "text": "It printed `hello` \u2014 a single line, followed by a newline, then exit code 0.", "logprobs": []}
+{"type": "response.content_part.done", "item_id": "msg_0001", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "It printed `hello` \u2014 a single line, followed by a newline, then exit code 0.", "annotations": []}}
+{"type": "response.output_item.done", "output_index": 0, "item": {"id": "msg_0001", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "It printed `hello` \u2014 a single line, followed by a newline, then exit code 0.", "annotations": []}]}}
+{"type": "response.output_item.added", "output_index": 1, "item": {"id": "rs_0002", "type": "reasoning", "summary": []}}
+{"type": "response.reasoning_summary_part.added", "item_id": "rs_0002", "output_index": 1, "summary_index": 0, "part": {"type": "summary_text", "text": ""}}
+{"type": "response.reasoning_summary_text.delta", "item_id": "rs_0002", "output_index": 1, "summary_index": 0, "delta": "Simple question: it printed \"hello\"."}
+{"type": "response.reasoning_summary_text.done", "item_id": "rs_0002", "output_index": 1, "summary_index": 0, "text": "Simple question: it printed \"hello\"."}
+{"type": "response.reasoning_summary_part.done", "item_id": "rs_0002", "output_index": 1, "summary_index": 0, "part": {"type": "summary_text", "text": "Simple question: it printed \"hello\"."}}
+{"type": "response.output_item.done", "output_index": 1, "item": {"id": "rs_0002", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Simple question: it printed \"hello\"."}]}}
+{"type": "hg.done", "usage": {"input_tokens": 18255, "output_tokens": 31, "input_tokens_details": {"cached_tokens": 17920}}}

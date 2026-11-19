@@ -1,0 +1,4 @@
+{"model":"no-such-model","provider":"Claude","session_id":"session_cat_1795005734649_1f10d60fb4b63dde","type":"start"}
+{"connection":"https/sse","type":"connection_type"}
+{"phase":"sending request","type":"connection_phase"}
+{"message":"Anthropic API error (400 Bad Request): {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 0586817c-d4f9-4be3-87af-c303fff76366)\"}}","model":"no-such-model","provider":"Claude","session_id":"session_cat_1795005734649_1f10d60fb4b63dde","type":"error"}

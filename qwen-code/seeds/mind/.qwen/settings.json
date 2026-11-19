@@ -1,0 +1,17 @@
+{
+  "general": {
+    "enableAutoUpdate": false,
+    "chatRecording": true
+  },
+  "privacy": {
+    "usageStatisticsEnabled": false
+  },
+  "telemetry": {
+    "enabled": false
+  },
+  "memory": {
+    "enableManagedAutoMemory": false,
+    "enableManagedAutoDream": false,
+    "enableAutoSkill": false
+  }
+}

@@ -1,0 +1,5 @@
+{"role":"meta","type":"system.version","version":"2.6.3"}
+{"role":"assistant","tool_calls":[{"type":"function","id":"call_00_hEnDMXg9DOqE8IpRqOlg8353","function":{"name":"mcp__echo__echo","arguments":"{\"text\":\"hello\"}"}}]}
+{"role":"tool","tool_call_id":"call_00_hEnDMXg9DOqE8IpRqOlg8353","content":"echo: hello"}
+{"role":"assistant","content":"I called the `echo` tool again with the text `\"hello\"`. It returned exactly this:\n\n```\necho: hello\n```"}
+{"role":"meta","type":"session.resume_hint","session_id":"session_caec0ce3-4bc0-45f7-aac0-36298a93d2f0","command":"kimi -r session_caec0ce3-4bc0-45f7-aac0-36298a93d2f0","content":"To resume this session: kimi -r session_caec0ce3-4bc0-45f7-aac0-36298a93d2f0"}

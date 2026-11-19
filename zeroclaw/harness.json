@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "name": "zeroclaw",
+  "version": "0.9.0-1",
+  "description": "ZeroClaw, unmodified.",
+  "mind": ".zeroclaw",
+  "apis": ["anthropic", "openai-responses", "openai-chat"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 15 }
+}

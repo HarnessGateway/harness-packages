@@ -1,0 +1,46 @@
+{"type": "session_start", "seq": 1, "ts": 1795003008.6, "session_id": "87363b48", "model": "anthropic/deepseek-flash", "cwd": "/work/.trial/cheetahclaws/work", "permission_mode": "accept-all", "mode": "headless", "resumed": false, "version": "3.5.90", "max_turns": null, "skipped_untrusted": []}
+{"type": "user_message", "seq": 2, "ts": 1795003008.609, "session_id": "87363b48", "text": "Write hello.py that prints hello, then run it."}
+{"type": "assistant_message", "seq": 3, "ts": 1795003011.384, "session_id": "87363b48", "text": "", "tool_calls": [{"id": "call_00_ET_fv3gXJ4AFF4gfwKQLpJH6151", "name": "Write"}], "model": "anthropic/deepseek-flash"}
+{"type": "usage", "seq": 4, "ts": 1795003011.384, "session_id": "87363b48", "input_tokens": 207, "output_tokens": 71, "cache_read_tokens": 9216, "cache_write_tokens": 0, "model": "anthropic/deepseek-flash"}
+{"type": "tool_call", "seq": 5, "ts": 1795003011.384, "session_id": "87363b48", "id": "call_00_ET_fv3gXJ4AFF4gfwKQLpJH6151", "name": "Write", "input": {"file_path": "/work/.trial/cheetahclaws/work/hello.py", "content": "print(\"hello\")\n"}}
+{"type": "tool_result", "seq": 6, "ts": 1795003011.387, "session_id": "87363b48", "id": "call_00_ET_fv3gXJ4AFF4gfwKQLpJH6151", "name": "Write", "is_error": false, "output": "Created /work/.trial/cheetahclaws/work/hello.py (1 lines)"}
+{"type": "assistant_message", "seq": 7, "ts": 1795003012.426, "session_id": "87363b48", "text": "", "tool_calls": [{"id": "call_00_ET_6GbmPEjAClGFFENe9saJ5355", "name": "Bash"}], "model": "anthropic/deepseek-flash"}
+{"type": "usage", "seq": 8, "ts": 1795003012.426, "session_id": "87363b48", "input_tokens": 181, "output_tokens": 55, "cache_read_tokens": 9344, "cache_write_tokens": 0, "model": "anthropic/deepseek-flash"}
+{"type": "tool_call", "seq": 9, "ts": 1795003012.426, "session_id": "87363b48", "id": "call_00_ET_6GbmPEjAClGFFENe9saJ5355", "name": "Bash", "input": {"command": "cd /work/.trial/cheetahclaws/work && python3 hello.py"}}
+{"type": "tool_result", "seq": 10, "ts": 1795003012.449, "session_id": "87363b48", "id": "call_00_ET_6GbmPEjAClGFFENe9saJ5355", "name": "Bash", "is_error": false, "output": "hello"}
+{"type": "assistant_delta", "seq": 11, "ts": 1795003013.838, "session_id": "87363b48", "text": "Created"}
+{"type": "assistant_delta", "seq": 12, "ts": 1795003013.864, "session_id": "87363b48", "text": " `/"}
+{"type": "assistant_delta", "seq": 13, "ts": 1795003013.865, "session_id": "87363b48", "text": "work"}
+{"type": "assistant_delta", "seq": 14, "ts": 1795003013.865, "session_id": "87363b48", "text": "/."}
+{"type": "assistant_delta", "seq": 15, "ts": 1795003013.865, "session_id": "87363b48", "text": "t"}
+{"type": "assistant_delta", "seq": 16, "ts": 1795003013.865, "session_id": "87363b48", "text": "rial"}
+{"type": "assistant_delta", "seq": 17, "ts": 1795003013.865, "session_id": "87363b48", "text": "/"}
+{"type": "assistant_delta", "seq": 18, "ts": 1795003013.865, "session_id": "87363b48", "text": "che"}
+{"type": "assistant_delta", "seq": 19, "ts": 1795003013.865, "session_id": "87363b48", "text": "et"}
+{"type": "assistant_delta", "seq": 20, "ts": 1795003013.865, "session_id": "87363b48", "text": "ah"}
+{"type": "assistant_delta", "seq": 21, "ts": 1795003013.865, "session_id": "87363b48", "text": "cl"}
+{"type": "assistant_delta", "seq": 22, "ts": 1795003013.865, "session_id": "87363b48", "text": "aws"}
+{"type": "assistant_delta", "seq": 23, "ts": 1795003013.865, "session_id": "87363b48", "text": "/work"}
+{"type": "assistant_delta", "seq": 24, "ts": 1795003013.885, "session_id": "87363b48", "text": "/"}
+{"type": "assistant_delta", "seq": 25, "ts": 1795003013.885, "session_id": "87363b48", "text": "hello"}
+{"type": "assistant_delta", "seq": 26, "ts": 1795003013.885, "session_id": "87363b48", "text": ".py"}
+{"type": "assistant_delta", "seq": 27, "ts": 1795003013.885, "session_id": "87363b48", "text": "`"}
+{"type": "assistant_delta", "seq": 28, "ts": 1795003013.885, "session_id": "87363b48", "text": " with"}
+{"type": "assistant_delta", "seq": 29, "ts": 1795003013.885, "session_id": "87363b48", "text": " `"}
+{"type": "assistant_delta", "seq": 30, "ts": 1795003013.896, "session_id": "87363b48", "text": "print"}
+{"type": "assistant_delta", "seq": 31, "ts": 1795003013.896, "session_id": "87363b48", "text": "(\""}
+{"type": "assistant_delta", "seq": 32, "ts": 1795003013.896, "session_id": "87363b48", "text": "hello"}
+{"type": "assistant_delta", "seq": 33, "ts": 1795003013.896, "session_id": "87363b48", "text": "\")"}
+{"type": "assistant_delta", "seq": 34, "ts": 1795003013.896, "session_id": "87363b48", "text": "`"}
+{"type": "assistant_delta", "seq": 35, "ts": 1795003013.896, "session_id": "87363b48", "text": " and"}
+{"type": "assistant_delta", "seq": 36, "ts": 1795003013.916, "session_id": "87363b48", "text": " ran"}
+{"type": "assistant_delta", "seq": 37, "ts": 1795003013.916, "session_id": "87363b48", "text": " it"}
+{"type": "assistant_delta", "seq": 38, "ts": 1795003013.916, "session_id": "87363b48", "text": " —"}
+{"type": "assistant_delta", "seq": 39, "ts": 1795003013.916, "session_id": "87363b48", "text": " output"}
+{"type": "assistant_delta", "seq": 40, "ts": 1795003013.929, "session_id": "87363b48", "text": ":"}
+{"type": "assistant_delta", "seq": 41, "ts": 1795003013.929, "session_id": "87363b48", "text": " `"}
+{"type": "assistant_delta", "seq": 42, "ts": 1795003013.929, "session_id": "87363b48", "text": "hello"}
+{"type": "assistant_delta", "seq": 43, "ts": 1795003013.929, "session_id": "87363b48", "text": "`"}
+{"type": "assistant_message", "seq": 44, "ts": 1795003013.95, "session_id": "87363b48", "text": "Created `/work/.trial/cheetahclaws/work/hello.py` with `print(\"hello\")` and ran it — output: `hello`", "tool_calls": [], "model": "anthropic/deepseek-flash"}
+{"type": "usage", "seq": 45, "ts": 1795003013.95, "session_id": "87363b48", "input_tokens": 249, "output_tokens": 34, "cache_read_tokens": 9344, "cache_write_tokens": 0, "model": "anthropic/deepseek-flash"}
+{"type": "result", "seq": 46, "ts": 1795003013.95, "session_id": "87363b48", "final_text": "Created `/work/.trial/cheetahclaws/work/hello.py` with `print(\"hello\")` and ran it — output: `hello`", "exit_reason": "completed", "is_error": false, "exit_code": 0, "turns": 3, "usage": {"input_tokens": 637, "output_tokens": 160, "cache_read_tokens": 27904, "cache_write_tokens": 0}, "cost_usd": 0.0, "duration_ms": 5362, "model": "anthropic/deepseek-flash", "permission_denials": [], "skipped_untrusted": []}

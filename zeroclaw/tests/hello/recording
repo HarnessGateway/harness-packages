@@ -1,0 +1,24 @@
+{"jsonrpc":"2.0","result":{"_meta":{"zeroclaw":{"defaultModel":"deepseek-flash","maxSessions":10,"sessionTimeoutSecs":3600}},"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":false,"sse":false},"promptCapabilities":{"audio":false,"embeddedContext":true,"image":false},"sessionCapabilities":{"close":{},"resume":{}}},"agentInfo":{"name":"zeroclaw-acp","title":"ZeroClaw ACP","version":"0.9.0"},"authMethods":[],"protocolVersion":1},"id":1}
+{"jsonrpc":"2.0","result":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","workspaceDir":"/work/.trial/zeroclaw/work"},"id":2}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":"Hey","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":",","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" I","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":"'m","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" zer","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":"oc","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":"law","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" 🦀","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" —","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" good","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" to","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" meet","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" you","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":",","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" what","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" are","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" we","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" working","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" on","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":" today","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","update":{"content":{"text":"?","type":"text"},"sessionUpdate":"agent_message_chunk"}}}
+{"jsonrpc":"2.0","result":{"content":"Hey, I'm zeroclaw 🦀 — good to meet you, what are we working on today?","sessionId":"d26ca1a3-f52a-480f-a6b3-b6eb2615642b","stopReason":"end_turn"},"id":3}

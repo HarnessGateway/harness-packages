@@ -1,0 +1,14 @@
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","send_feedback","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","session-info","feedback","deep-research","workflow","goal","loop"]}
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","send_feedback","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","session-info","feedback","deep-research","workflow","goal","loop"]}
+{"type":"text","data":"Hello"}
+{"type":"text","data":"!"}
+{"type":"text","data":" How"}
+{"type":"text","data":" can"}
+{"type":"text","data":" I"}
+{"type":"text","data":" help"}
+{"type":"text","data":" you"}
+{"type":"text","data":" today"}
+{"type":"text","data":"?"}
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","send_feedback","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","session-info","feedback","deep-research","workflow","goal","loop"]}
+{"type":"usage","messageId":"565a07dc-d354-48d1-8748-9402aeaa5696","stopReason":"end_turn","usage":{"input_tokens":7756,"output_tokens":10,"cache_read_input_tokens":4096,"cache_creation_input_tokens":0,"reasoning_tokens":0},"signature":"565a07dc-d354-48d1-8748-9402aeaa5696"}
+{"type":"end","stopReason":"end_turn","sessionId":"34d6a90a-0263-463b-a4b7-bddc87a63fb4","requestId":"f3a7d01e-b946-4952-a729-641b4921db57","cwd":"/work/.trial/grok/work","usage":{"input_tokens":7756,"cache_read_input_tokens":4096,"cache_creation_input_tokens":0,"output_tokens":10,"reasoning_tokens":0,"total_tokens":11862},"num_turns":1,"modelUsage":{"deepseek-flash":{"inputTokens":7756,"outputTokens":10,"cacheReadInputTokens":4096,"cacheCreationInputTokens":0,"modelCalls":1}}}

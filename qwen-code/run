@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""One turn of Qwen Code: start it headless, and say in Responses events what it does.
+
+Qwen Code prints one JSON object per line (`--output-format stream-json`): a `system` line with its session
+id, the provider's streaming events as they arrive (`stream_event`, with `--include-partial-messages`), each
+finished assistant message, each tool result, and one last `result` line.
+"""
+
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+QWEN = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "qwen")
+DIFF_MAX = 100_000
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def environment():
+    """Qwen Code is told its provider through the auth type's variables; the key is the platform's placeholder."""
+    env = dict(os.environ)
+    url, key = os.environ["HG_PROVIDER_URL"], os.environ["HG_PROVIDER_KEY"]
+    api = os.environ.get("HG_PROVIDER_API", "")
+    if api == "anthropic":
+        env.update({"ANTHROPIC_BASE_URL": url, "ANTHROPIC_API_KEY": key, "ANTHROPIC_MODEL": os.environ["HG_MODEL"]})
+    elif api in ("openai-chat", "openai-responses"):
+        env.update({"OPENAI_BASE_URL": url, "OPENAI_API_KEY": key, "OPENAI_MODEL": os.environ["HG_MODEL"]})
+    elif api == "gemini":
+        env.update({"GOOGLE_GEMINI_BASE_URL": url, "GEMINI_API_KEY": key, "GEMINI_MODEL": os.environ["HG_MODEL"]})
+    env.update({
+        "QWEN_CODE_SUPPRESS_YOLO_WARNING": "1",   # headless with --yolo; the platform's sandbox is the boundary
+        "CI": env.get("CI", "1"),
+    })
+    return env
+
+
+def auth_type():
+    return {
+        "anthropic": "anthropic",
+        "openai-chat": "openai",
+        "openai-responses": "openai-responses",
+        "gemini": "gemini",
+    }[os.environ.get("HG_PROVIDER_API", "")]
+
+
+def settings_path():
+    return os.path.join(os.environ["HG_MIND"], ".qwen", "settings.json")
+
+
+def set_effort(effort):
+    """Qwen Code takes reasoning effort from its settings (there is no flag); set it for this turn."""
+    if not effort or effort not in EFFORTS:
+        return
+    path = settings_path()
+    try:
+        with open(path, encoding="utf-8") as file:
+            settings = json.load(file)
+        if not isinstance(settings, dict):
+            settings = {}
+    except (OSError, ValueError):
+        settings = {}
+    model = settings.get("model") if isinstance(settings.get("model"), dict) else {}
+    if model.get("reasoningEffort") == effort:
+        return
+    model["reasoningEffort"] = effort
+    settings["model"] = model
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(settings, file, indent=2)
+        file.write("\n")
+
+
+def mcp_servers(request):
+    """The request's remote MCP servers as Qwen Code's `mcpServers` entries (streamable HTTP)."""
+    servers = {}
+    for server in request.mcp_servers:
+        label = server.get("server_label")
+        url = server.get("server_url")
+        if not label or not url:
+            continue
+        entry = {"httpUrl": url, "trust": True}
+        if server.get("headers"):
+            entry["headers"] = server["headers"]
+        if server.get("allowed_tools"):
+            entry["includeTools"] = server["allowed_tools"]
+        servers[label] = entry
+    return servers
+
+
+def output_schema(request):
+    given = request.body.get("text")
+    if not isinstance(given, dict):
+        return None
+    fmt = given.get("format")
+    if isinstance(fmt, dict) and fmt.get("type") == "json_schema" and isinstance(fmt.get("schema"), dict):
+        return fmt["schema"]
+    return None
+
+
+def command(request, session):
+    args = [QWEN, "--auth-type", auth_type(), "--model", os.environ["HG_MODEL"],
+            "--yolo", "--output-format", "stream-json", "--include-partial-messages"]
+    if request.instructions:
+        args += ["--append-system-prompt", request.instructions]
+    servers = mcp_servers(request)
+    if servers:
+        args += ["--mcp-config", json.dumps({"mcpServers": servers})]
+    schema = output_schema(request)
+    if schema is not None:
+        args += ["--json-schema", json.dumps(schema)]
+    if session:
+        args += ["--resume", session]
+    return args
+
+
+def text_of(content):
+    """A tool result's text: Qwen Code gives a string, or a list of blocks."""
+    if isinstance(content, str):
+        return content
+    return "\n".join(block.get("text", "") for block in content or [] if isinstance(block, dict))
+
+
+def diff_of(text, mark):
+    body = "".join(f"{mark}{line}\n" for line in text.splitlines())
+    return body[:DIFF_MAX]
+
+
+def shell_parts(text, failed):
+    """Qwen Code's shell result is `Command: … / Output: … / Error: … / Exit Code: …`; split it back up."""
+    marker = re.search(r"(?m)^Output: ?", text)
+    code = re.search(r"(?m)^Exit Code:\s*(-?\d+)", text)
+    out, err = text, ""
+    if marker:
+        rest = text[marker.end():]
+        end = re.search(r"(?m)^Error: ?", rest)
+        if end:
+            out = rest[:end.start()]
+            after = rest[end.end():]
+            stop = re.search(r"(?m)^Exit Code:", after)
+            said = (after[:stop.start()] if stop else after).rstrip("\n")
+            if said.strip() not in ("", "(none)"):
+                err = said
+        else:
+            out = rest
+        out = out.rstrip("\n")
+    exit_code = int(code.group(1)) if code else (1 if failed else 0)
+    return out, err, exit_code
+
+
+class Translator:
+    """Qwen Code's lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}          # tool_use id -> (name, input): waiting for its result
+        self.streamed = False    # whether the message being read has arrived piece by piece
+        self.ended = False
+        self.counted = {"input_tokens": 0, "output_tokens": 0,
+                        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        self.reported = False    # whether any message reported usage for this turn
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # not JSON: something it printed aside
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            self.session(event.get("session_id"))
+        elif kind == "stream_event" and not event.get("parent_tool_use_id"):
+            self.piece(event.get("event") or {})
+        elif kind == "assistant":
+            self.message(event.get("message") or {}, bool(event.get("parent_tool_use_id")))
+        elif kind == "user":
+            for block in (event.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    self.result(block)
+        elif kind == "result":
+            self.session(event.get("session_id"))
+            self.end(event)
+
+    def session(self, value):
+        if value and self.state.get("session") != value:
+            self.state.set("session", value)                            # saved the moment the CLI reports it
+
+    def piece(self, event):
+        kind = event.get("type")
+        if kind == "message_start":
+            self.streamed = False
+        elif kind == "content_block_start":
+            self.streamed = True
+        delta = event.get("delta") or {}
+        if delta.get("type") == "text_delta":
+            self.streamed = True
+            self.emit.say(delta.get("text", ""))
+        elif delta.get("type") == "thinking_delta":
+            self.streamed = True
+            self.emit.think(delta.get("thinking", ""))
+
+    def message(self, message, from_subagent):
+        counted = message.get("usage") or {}
+        if any(counted.get(name) for name in self.counted):
+            self.reported = True                    # Qwen Code reports each call's usage, and the result's
+            for name in self.counted:               # totals are the whole session's: add up this turn's calls
+                self.counted[name] += counted.get(name, 0) or 0
+        for block in message.get("content") or []:
+            if block.get("type") == "tool_use":
+                self.calls[block.get("id")] = (block.get("name", ""), block.get("input") or {})
+            elif not self.streamed and not from_subagent:               # it did not arrive piece by piece
+                if block.get("type") == "text":
+                    self.emit.say(block.get("text", ""))
+                elif block.get("type") == "thinking":
+                    self.emit.think(block.get("thinking", ""))
+        self.streamed = False
+
+    def result(self, block):
+        name, given = self.calls.pop(block.get("tool_use_id"), ("", {}))
+        output, failed = text_of(block.get("content")), bool(block.get("is_error"))
+        if name == "tool_call":                                    # its wrapper for deferred and MCP tools
+            inner = given.get("name", "")
+            arguments = given.get("arguments") or {}
+            if inner.startswith("mcp__") and inner.count("__") >= 2:
+                _, server, tool = inner.split("__", 2)
+                self.emit.called(server, tool, arguments, output=None if failed else output,
+                                 error=output if failed else None)
+            else:
+                self.emit.used(inner or "tool_call", json.dumps(arguments), output)
+        elif name == "run_shell_command":
+            out, err, exit_code = shell_parts(output, failed)
+            self.emit.ran(given.get("command", ""), stdout=out, stderr=err, exit_code=exit_code)
+        elif name == "write_file" and not failed:
+            self.emit.wrote(given.get("file_path", ""), diff_of(given.get("content", ""), "+"))
+        elif name == "edit" and not failed:
+            diff = diff_of(given.get("old_string", ""), "-") + diff_of(given.get("new_string", ""), "+")
+            self.emit.edited(given.get("file_path", ""), diff[:DIFF_MAX])
+        elif name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            self.emit.called(server, tool, given, output=None if failed else output,
+                             error=output if failed else None)
+        elif name:
+            self.emit.used(name, json.dumps(given), output)
+
+    def end(self, event):
+        # The `result` line's usage is the whole session's (Qwen Code adds it up across --resume); the messages
+        # of this turn report this turn's calls. Use those, and fall back to the result when it reported none.
+        counted = self.counted if self.reported else (event.get("usage") or {})
+        cached = counted.get("cache_read_input_tokens", 0)
+        usage = {
+            "input_tokens": counted.get("input_tokens", 0) + cached + counted.get("cache_creation_input_tokens", 0),
+            "output_tokens": counted.get("output_tokens", 0),
+            "input_tokens_details": {"cached_tokens": cached},
+        }
+        self.ended = True
+        if event.get("is_error") or event.get("subtype") != "success":
+            said = ((event.get("error") or {}).get("message") or event.get("result")
+                    or f"Qwen Code ended with {event.get('subtype')}")
+            self.emit.failed(str(event.get("subtype") or "cli_error"), str(said)[:2000], usage)
+        else:
+            self.emit.done(usage)
+
+
+def turn(request, emit, state, session):
+    """Run the CLI once. Returns its translator and its exit code."""
+    hgkit.seed()
+    set_effort(request.effort)
+    cli = hgkit.Cli(command(request, session), env=environment(), stdin=request.brief(instructions=False))
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        if not translator.ended:
+            translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    given = request.body.get("text")
+    fmt = given.get("format") if isinstance(given, dict) else None
+    if isinstance(fmt, dict) and fmt.get("type") not in ("text", "json_schema"):
+        emit.log(f"Qwen Code cannot enforce text.format {fmt.get('type')!r}; it was not applied")
+
+    session = state.get("session")
+    translator, code = turn(request, emit, state, session)
+    if session and not translator.ended and not translator.calls and code != 0:
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): start a new one.
+        emit.log(f"Qwen Code could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code = turn(request, emit, state, None)
+    if not translator.ended:
+        emit.failed("cli_exit", f"Qwen Code exited with code {code} without a result.")
+
+
+if __name__ == "__main__":
+    main()

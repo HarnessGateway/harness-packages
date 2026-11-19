@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""One turn of Roder: `roder exec` headless, its JSONL events translated into Responses events.
+
+Roder's own headless entrypoint (`roder exec --json`) prints one event per line: `thread.started`,
+`turn.started`, `item.started` / `item.updated` / `item.completed`, and one last `turn.completed`
+(carrying the turn's token counts) or `turn.failed`. Items are the agent's messages, its reasoning,
+and its tool executions.
+"""
+
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+RODER = os.path.join(os.environ["HG_HARNESS"], "tools", "roder")
+RODER_HOME = os.path.join(os.environ["HOME"], ".roder")
+PROVIDER_ID = "platform"                     # a custom provider: the turn's base URL, key and model
+DIFF_MAX = 100_000
+SHELL_TOOLS = {"exec_command", "shell", "unified_exec"}
+
+
+def toml_string(value):
+    """A TOML basic string. JSON's quoting is a subset of TOML's for the characters paths and URLs use."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def write_config(model, api, url, effort):
+    """Tell Roder where this turn's model is. Roder reads config.toml under its config directory."""
+    lines = [
+        f"provider = {toml_string(PROVIDER_ID)}",
+        f"model = {toml_string(model)}",
+    ]
+    if effort:
+        lines.append(f"reasoning = {toml_string(effort)}")
+    lines += [
+        "",
+        f"[providers.{PROVIDER_ID}]",
+        f"base_url = {toml_string(url)}",
+        'api_key_env = "HG_PROVIDER_KEY"',       # a placeholder: the platform's proxy puts the real key in
+        f"models = [{toml_string(model)}]",      # no /models discovery call: the turn knows its model
+    ]
+    if api == "openai-chat":
+        lines.append('protocol = "chat_completions"')
+    lines += [
+        "",
+        "[analytics]",
+        "enabled = false",
+        "",
+        "[search_index]",
+        "enabled = false",                       # no per-workspace code index in the mind
+        "",
+        "[knowledge]",
+        "enabled = false",
+        "",
+        "[notifications]",
+        "enabled = false",
+        "",
+    ]
+    os.makedirs(RODER_HOME, exist_ok=True)
+    with open(os.path.join(RODER_HOME, "config.toml"), "w", encoding="utf-8") as file:
+        file.write("\n".join(lines))
+
+
+def environment(model, effort):
+    env = dict(os.environ)
+    env.update({
+        "RODER_CONFIG_DIR": RODER_HOME,          # config and threads stay in the mind, not beside the package
+        "RODER_DATA_DIR": RODER_HOME,
+        "RODER_PROVIDER": PROVIDER_ID,           # these beat anything the environment set
+        "RODER_MODEL": model,
+    })
+    if effort:
+        env["RODER_REASONING"] = effort
+    else:
+        env.pop("RODER_REASONING", None)
+    return env
+
+
+def command(session):
+    args = [RODER, "exec"]
+    if session:
+        args += ["resume", session]              # `resume` is the first word after `exec`
+    args += ["--json", "--profile", "non_interactive", "--mode", "bypass", "-"]
+    return args
+
+
+def plus_lines(text):
+    return "".join(f"+{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def minus_lines(text):
+    return "".join(f"-{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def patch_operations(patch):
+    """The file operations in a `*** Begin Patch` text, as (kind, path, diff)."""
+    operations = []
+    current = None
+    for line in patch.splitlines():
+        if line.startswith("*** Add File:"):
+            current = {"kind": "create", "path": line.split(":", 1)[1].strip(), "diff": ""}
+            operations.append(current)
+        elif line.startswith("*** Update File:"):
+            current = {"kind": "update", "path": line.split(":", 1)[1].strip(), "diff": ""}
+            operations.append(current)
+        elif line.startswith("*** Delete File:"):
+            current = {"kind": "delete", "path": line.split(":", 1)[1].strip(), "diff": ""}
+            operations.append(current)
+        elif line.startswith("*** "):
+            current = None
+        elif current is not None and current["kind"] != "delete" and line[:1] in ("+", "-"):
+            current["diff"] += line + "\n"
+    return [(op["kind"], op["path"], op["diff"][:DIFF_MAX]) for op in operations if op["path"]]
+
+
+def exec_output(text, failed):
+    """An exec tool's text: `Exit code: N ... Output:` followed by the command's combined output."""
+    match = re.search(r"^Exit code: (-?\d+|still running)\b", text, re.M)
+    exit_code = int(match.group(1)) if match and match.group(1).lstrip("-").isdigit() else (1 if failed else 0)
+    marker = text.find("\nOutput:\n")
+    if marker >= 0:
+        return text[marker + len("\nOutput:\n"):], "", exit_code
+    if failed:
+        return "", text or "the command failed", exit_code
+    return text, "", exit_code
+
+
+class Translator:
+    """Roder's JSONL events in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.terminal = False
+        self.turn_started = False
+        self.calls = {}                 # tool item id -> the item.started event, for its arguments
+        self.emitted_tools = set()
+        self.emitted_text = set()       # (item id, text) so a repeated completion is not printed twice
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "thread.started" and event.get("thread_id"):
+            self.state.set("session", event["thread_id"])        # the moment it is reported
+        elif kind == "turn.started":
+            self.turn_started = True
+        elif kind == "item.started":
+            item = event.get("item") or {}
+            if item.get("type") == "toolExecution" and item.get("id"):
+                self.calls.setdefault(item["id"], item)
+        elif kind == "item.completed":
+            self.item(event.get("item") or {})
+        elif kind == "error":
+            self.emit.log(str(event.get("message") or "Roder reported an error"))
+        elif kind == "turn.completed":
+            self.emit.done(usage_of(event.get("usage")))
+            self.terminal = True
+        elif kind == "turn.failed":
+            said = failure_message(event.get("error") or "Roder reported the turn failed.")
+            self.emit.failed("turn_failed", said[:2000], usage_of(event.get("usage")))
+            self.terminal = True
+
+    def item(self, item):
+        kind = item.get("type")
+        text = item.get("text")
+        if kind == "toolExecution":
+            ident = item.get("id")
+            if ident and ident not in self.emitted_tools:
+                self.emitted_tools.add(ident)
+                self.tool(item)
+        elif kind == "agentMessage" and isinstance(text, str) and text:
+            # Roder 0.4.10 records the same pre-tool assistant text twice, once as `commentary` and once as
+            # `final_answer`, under two item ids; print the text once.
+            key = ("message", text)
+            if key not in self.emitted_text:
+                self.emitted_text.add(key)
+                self.emit.say(text)
+        elif kind == "reasoning" and isinstance(text, str) and text:
+            key = ("reasoning", text)
+            if key not in self.emitted_text:
+                self.emitted_text.add(key)
+                self.emit.think(text)
+
+    def tool(self, item):
+        started = self.calls.get(item.get("id")) or {}
+        name = item.get("tool_name") or started.get("tool_name") or ""
+        # The call's arguments are on `item.started`; `item.completed` repeats some of them and adds the
+        # result. Merge the two so a completion that only says `path` keeps the started event's `content`.
+        given, done = started.get("payload"), item.get("payload")
+        payload = {**(given if isinstance(given, dict) else {}), **(done if isinstance(done, dict) else {})}
+        output = item.get("text") if isinstance(item.get("text"), str) else ""
+        failed = item.get("status") == "failed"
+
+        if name in SHELL_TOOLS:
+            given = payload.get("cmd") or payload.get("command") or payload.get("input") or ""
+            stdout, stderr, exit_code = exec_output(output, failed)
+            self.emit.ran(str(given), stdout=stdout, stderr=stderr, exit_code=exit_code)
+        elif not failed and name == "write_file":
+            self.emit.wrote(str(payload.get("path", "")), plus_lines(str(payload.get("content", ""))))
+        elif not failed and name == "edit":
+            diff = minus_lines(str(payload.get("old_string", ""))) + plus_lines(str(payload.get("new_string", "")))
+            self.emit.edited(str(payload.get("path", "")), diff[:DIFF_MAX])
+        elif not failed and name == "multi_edit":
+            diff = "".join(
+                minus_lines(str(edit.get("old_string", ""))) + plus_lines(str(edit.get("new_string", "")))
+                for edit in payload.get("edits") or [] if isinstance(edit, dict)
+            )
+            self.emit.edited(str(payload.get("path", "")), diff[:DIFF_MAX])
+        elif not failed and name == "apply_patch":
+            operations = patch_operations(str(payload.get("patch") or payload.get("input") or ""))
+            if not operations:
+                self.emit.used(name, json.dumps(payload, ensure_ascii=False), output)
+            for kind, path, diff in operations:
+                if kind == "create":
+                    self.emit.wrote(path, diff)
+                elif kind == "update":
+                    self.emit.edited(path, diff)
+                else:
+                    self.emit.deleted(path)
+        elif re.match(r"^mcp__[A-Za-z0-9_-]+__.+$", name):
+            _, server, tool = name.split("__", 2)
+            if failed:
+                self.emit.called(server, tool, payload, error=output or "the tool failed")
+            else:
+                self.emit.called(server, tool, payload, output=output)
+        else:
+            self.emit.used(name or "tool", json.dumps(payload, ensure_ascii=False), output)
+
+
+def failure_message(said):
+    """Roder sometimes carries the provider's JSON error as a string; show the sentence inside it."""
+    text = said if isinstance(said, str) else str(said)
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
+        return parsed["message"]
+    return text
+
+
+def usage_of(counted):
+    if not isinstance(counted, dict):
+        return None
+    return {
+        "input_tokens": int(counted.get("input_tokens") or 0),
+        "output_tokens": int(counted.get("output_tokens") or 0),
+        "input_tokens_details": {"cached_tokens": int(counted.get("cached_input_tokens") or 0)},
+    }
+
+
+def turn(request, emit, state, session):
+    write_config(request.model, request.provider.api, request.provider.url, request.effort)
+    cli = hgkit.Cli(command(session), env=environment(request.model, request.effort), stdin=request.brief())
+    translator = Translator(emit, state)
+    for line in cli.lines():
+        if not translator.terminal:
+            translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    api, model = request.provider.api, request.model
+    if api not in ("openai-responses", "openai-chat"):
+        emit.failed("unsupported_api",
+                    f"Roder speaks the OpenAI Responses and Chat Completions APIs, and this turn's provider "
+                    f"offers {api or 'no API'}.")
+        return
+    if not model:
+        emit.failed("no_model", "The request named no model for Roder to ask.")
+        return
+    if not os.environ.get("HG_REPLAY") and not os.path.exists(RODER):
+        emit.failed("cli_missing", f"Roder is not installed at {RODER}; install this harness again.")
+        return
+    hgkit.seed()
+    if request.mcp_servers:
+        emit.log("Roder exec cannot be given MCP servers: the request's MCP tools were not added")
+    session = state.get("session")
+    translator, code = turn(request, emit, state, session)
+    if session and not translator.terminal and not translator.turn_started and code != 0:
+        # Its record of the thread is gone or unusable (a stopped turn can leave it so): start a new one.
+        emit.log(f"Roder could not resume thread {session} (exit code {code}); starting a new thread")
+        state.clear("session")
+        translator, code = turn(request, emit, state, None)
+    if not translator.terminal:
+        emit.failed("cli_exit", f"Roder exited with code {code} without finishing the turn.")
+
+
+if __name__ == "__main__":
+    main()

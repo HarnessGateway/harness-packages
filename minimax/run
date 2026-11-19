@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""One turn of MiniMax Code (the mcode CLI): `mcode exec --output-format stream-json`.
+
+MiniMax Code prints one JSON object per line: `exec.started`, `session.started`, `turn.started`,
+`item.started`/`item.updated`/`item.completed` for the agent's message, reasoning and tool calls,
+then `turn.completed` (with the token counts) and `exec.completed`. A failed run prints
+`turn.failed` and an `exec.completed` whose result says `failed`.
+"""
+
+import json
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+MCODE = os.path.join(os.environ["HG_HARNESS"], "tools", "node_modules", ".bin", "mcode")
+PROVIDER_ID = "custom_provider:harnessgateway"
+
+# The platform's API name -> MiniMax Code's provider `api` value.
+API_FORMATS = {
+    "anthropic": "anthropic-messages",
+    "openai-responses": "openai-responses",
+    "openai-chat": "openai-completions",
+    "gemini": "google-generative-ai",
+}
+DIFF_MAX = 100_000
+
+
+def quoted(value):
+    """A YAML double-quoted scalar: JSON's string syntax is YAML 1.2's, escapes included."""
+    return json.dumps(str(value))
+
+
+def config_text(api, model):
+    """A complete Runtime config for this turn. MiniMax Code keeps API keys in its config, so this file
+    holds the turn's placeholder (the platform's proxy puts the real key in on the way out); it is
+    written to a temporary file and never into the package or the mind."""
+    return (
+        "logLevel: info\n"
+        f"defaultModel: {quoted(f'{PROVIDER_ID}/{model}')}\n"
+        "dataContribution:\n"
+        "  enabled: false\n"
+        "custom_provider:\n"
+        "  harnessgateway:\n"
+        "    name: HarnessGateway\n"
+        "    kind: custom\n"
+        "    enabled: true\n"
+        f"    api: {quoted(API_FORMATS[api])}\n"
+        "    options:\n"
+        f"      apiKey: {quoted(os.environ['HG_PROVIDER_KEY'])}\n"
+        f"      baseURL: {quoted(os.environ['HG_PROVIDER_URL'])}\n"
+        "      authMode: api-key\n"
+        "    models:\n"
+        f"      {quoted(model)}:\n"
+        "        reasoning: true\n"
+        "        thinking_config:\n"
+        "          mode: switchable\n"
+        '          default_value: "true"\n'
+    )
+
+
+def environment(data_dir):
+    env = dict(os.environ)
+    env["MINIMAX_DATA_DIR"] = data_dir
+    return env
+
+
+def write_mcp(request, state, emit):
+    """Put the request's MCP servers into the workspace's `.mcp.json`, which `mcode exec` loads.
+
+    Servers this package added on an earlier turn are removed first, so a turn without `tools` of type
+    `mcp` does not keep calling them. Whatever else the file holds is preserved.
+    """
+    path = os.path.join(os.environ["HG_WORK"], ".mcp.json")
+    try:
+        owned = json.loads(state.get("mcp_servers") or "[]")
+    except ValueError:
+        owned = []
+    document = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as file:
+                document = json.load(file)
+        except (OSError, ValueError):
+            emit.log(f"{path} could not be read; replacing it")
+            document = {}
+    if not isinstance(document, dict):
+        document = {}
+    servers = document.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    for label in owned if isinstance(owned, list) else []:
+        servers.pop(label, None)
+
+    current = []
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not label or not url:
+            emit.log(f"an MCP server entry has no server_label or server_url: {json.dumps(server)[:500]}")
+            continue
+        entry = {"type": "http", "url": url}
+        if isinstance(server.get("headers"), dict):
+            entry["headers"] = server["headers"]
+        servers[label] = entry
+        current.append(label)
+        if server.get("allowed_tools"):
+            emit.log(f"MCP server {label}: allowed_tools is not applied; the CLI offers all of its tools")
+
+    state.set("mcp_servers", json.dumps(current))
+    if current or servers:
+        document["mcpServers"] = servers
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(document, file, indent=2)
+            file.write("\n")
+
+
+def command(request, session, config_path):
+    args = [MCODE, "exec", "--output-format", "stream-json", "--permission", "full",
+            "--model", f"{PROVIDER_ID}/{request.model}", "--input", "-", "--cwd",
+            os.environ["HG_WORK"]]
+    if session:
+        args += ["--session", session]
+    if request.instructions:
+        args += ["--append-system-prompt", request.instructions]
+    args += ["--config", config_path]
+
+    text = request.body.get("text")
+    fmt = (text or {}).get("format") if isinstance(text, dict) else None
+    if (isinstance(fmt, dict) and fmt.get("type") == "json_schema"
+            and isinstance(fmt.get("schema"), dict) and request.provider.api != "gemini"):
+        args += ["--output-schema", json.dumps(fmt["schema"])]
+    return args
+
+
+def output_text(output):
+    if not isinstance(output, dict):
+        return ""
+    texts = [block.get("text") for block in output.get("content") or []
+             if isinstance(block, dict) and isinstance(block.get("text"), str)]
+    return "\n".join(texts)
+
+
+def marked_lines(text, mark):
+    return "".join(f"{mark}{line}\n" for line in str(text or "").splitlines())[:DIFF_MAX]
+
+
+def number(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def usage_of(value):
+    """MiniMax Code's counts in the Responses usage shape. Its inputTokens exclude cached tokens, and
+    the platform counts all input: cache reads (and writes, when it reports them) are added in."""
+    if not isinstance(value, dict):
+        return None
+    cached = number(value.get("cacheReadTokens"))
+    given = number(value.get("inputTokens")) + cached + number(value.get("cacheWriteTokens"))
+    produced = number(value.get("outputTokens"))
+    if not (given or produced):
+        return None
+    return {"input_tokens": given, "output_tokens": produced,
+            "input_tokens_details": {"cached_tokens": cached}}
+
+
+class Translator:
+    """MiniMax Code's JSON lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.saved_session = False
+        self.streamed = set()          # item ids whose text arrived piece by piece
+        self.ended = False
+        self.seen_event = False
+        # The terminal line is held back until the CLI has ended: a turn that is stopped prints none.
+        self.terminal = None
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        self.seen_event = True
+        session = event.get("sessionId")
+        if isinstance(session, str) and session and not self.saved_session:
+            self.state.set("session", session)                   # a stopped turn must still be continued
+            self.saved_session = True
+        kind = event.get("type")
+        if kind in ("item.started", "item.updated", "item.completed"):
+            self.item(kind, event.get("item") or {})
+        elif kind == "turn.completed":
+            pass                                                 # exec.completed carries the outcome
+        elif kind == "turn.failed":
+            error = event.get("error") or {}
+            self.fail(error, event.get("usage"))
+        elif kind == "exec.completed":
+            self.end(event.get("result") or {}, event.get("usage"))
+        elif kind in ("exec.started", "session.started", "session.resumed", "turn.started"):
+            pass
+        else:
+            self.emit.log(line[:2000])
+
+    def item(self, kind, item):
+        if self.ended:
+            return
+        what = item.get("type")
+        item_id = item.get("id")
+        if what in ("agent_message", "reasoning"):
+            piece = item.get("contentDelta")
+            if isinstance(piece, str) and piece:
+                self.streamed.add(item_id)
+                (self.emit.say if what == "agent_message" else self.emit.think)(piece)
+            elif kind == "item.completed" and item_id not in self.streamed:
+                text = item.get("content")
+                if isinstance(text, str) and text:
+                    (self.emit.say if what == "agent_message" else self.emit.think)(text)
+        elif what == "tool_call" and kind == "item.completed":
+            self.tool(item.get("toolCall") or {})
+
+    def tool(self, call):
+        name = call.get("name") or ""
+        given = call.get("input") if isinstance(call.get("input"), dict) else {}
+        output = call.get("output") if isinstance(call.get("output"), dict) else {}
+        details = output.get("details") if isinstance(output.get("details"), dict) else {}
+        text = output_text(output)
+        failed = call.get("status") != 2
+
+        if name in ("bash", "shell"):
+            process = details.get("processOutput") if isinstance(details.get("processOutput"), dict) else {}
+            exit_code = process.get("exitCode")
+            if exit_code is None:
+                exit_code = (details.get("execution") or {}).get("exitCode") or 0
+            self.emit.ran(str(given.get("command", "")),
+                          stdout=str(process.get("stdout") or ("" if process else text)),
+                          stderr=str(process.get("stderr") or ""),
+                          exit_code=int(number(exit_code)))
+        elif name in ("write", "write_file") and not failed:
+            path = given.get("path") or given.get("file_path") or ""
+            diff = (details.get("patch") or details.get("diff")
+                    or marked_lines(given.get("content"), "+"))
+            (self.emit.wrote if details.get("created") is True else self.emit.edited)(path, diff)
+        elif name in ("edit", "edit_file", "multi_edit", "multiedit") and not failed:
+            path = given.get("file_path") or given.get("path") or ""
+            diff = details.get("patch") or details.get("diff")
+            if not diff:
+                edits = given.get("edits") if isinstance(given.get("edits"), list) else [given]
+                diff = "".join(marked_lines(edit.get("old_string"), "-") + marked_lines(edit.get("new_string"), "+")
+                               for edit in edits if isinstance(edit, dict))
+            self.emit.edited(path, str(diff or "")[:DIFF_MAX])
+        elif name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            self.emit.called(server, tool, given, output=None if failed else text,
+                             error=text if failed else None)
+        else:
+            self.emit.used(name or "tool", json.dumps(given), text)
+
+    def fail(self, error, usage=None):
+        if self.ended:
+            return
+        if not isinstance(error, dict):
+            error = {"message": str(error)}
+        message = str(error.get("message") or "MiniMax Code reported a failure.").strip() or \
+            "MiniMax Code reported a failure."
+        fallback = "provider_error" if "upstream error" in message.lower() else "cli_error"
+        code = str(error.get("code") or fallback).lower()
+        code = "".join(character if character.isalnum() or character == "_" else "_" for character in code)
+        self.ended = True
+        self.terminal = ("failed", (code or "cli_error", message[:2000], usage_of(usage)))
+
+    def end(self, result, event_usage=None):
+        if self.ended:
+            return
+        usage = usage_of(result.get("usage")) or usage_of(event_usage)
+        status = result.get("status")
+        if status == "succeeded":
+            self.ended = True
+            self.terminal = ("done", (usage,))
+        elif status == "failed":
+            self.fail(result.get("error") or {}, result.get("usage") or event_usage)
+        elif status in ("cancelled", "canceled"):
+            self.ended = True
+            self.terminal = ("failed", ("cancelled", "MiniMax Code cancelled the run.", usage))
+        else:
+            self.ended = True
+            self.terminal = ("failed", ("cli_exit", f"MiniMax Code ended with status {status!r}.", usage))
+
+    def print_terminal(self, emit):
+        if self.terminal:
+            getattr(emit, self.terminal[0])(*self.terminal[1])
+
+
+def turn(request, emit, state, session, api, config_path):
+    """Run the CLI once. Returns its translator, its exit code, and whether the turn was stopped."""
+    hgkit.seed()
+    write_mcp(request, state, emit)
+    cli = hgkit.Cli(command(request, session, config_path), env=environment(
+        os.path.join(os.environ["HG_MIND"], ".minimax")), stdin=request.brief(instructions=False))
+    translator = Translator(emit, state)
+    stopped = False
+    try:
+        for line in cli.lines():
+            if not translator.ended:
+                translator.read(line)
+    except SystemExit:                                  # the kit stopped the CLI: the turn ends here
+        stopped = True
+    return translator, cli.exit_code, stopped
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    api = request.provider.api
+    if api not in API_FORMATS:
+        emit.failed("config", f"MiniMax Code was given the {api or 'empty'} provider API, which it has no "
+                              f"configuration for (it speaks {', '.join(API_FORMATS)}).")
+        return
+    if request.effort:
+        emit.log(f"MiniMax Code's custom providers do not advertise reasoning-effort levels, so "
+                 f"reasoning.effort {request.effort!r} is not applied")
+
+    text = request.body.get("text")
+    fmt = (text or {}).get("format") if isinstance(text, dict) else None
+    if isinstance(fmt, dict) and fmt.get("type") == "json_schema" and api == "gemini":
+        emit.log("MiniMax Code does not support a JSON Schema output constraint for Gemini providers")
+
+    config = tempfile.NamedTemporaryFile("w", suffix=".yaml", prefix="mcode-", delete=False)
+    try:
+        config.write(config_text(api, request.model))
+        config.close()
+        session = state.get("session")
+        translator, code, stopped = turn(request, emit, state, session, api, config.name)
+        if stopped:
+            return
+        if session and not translator.ended and not translator.seen_event and code != 0:
+            # Its own record of the session is gone (a stopped turn can leave it so): start a new one.
+            emit.log(f"MiniMax Code could not resume session {session} (exit code {code}); starting a new one")
+            state.clear("session")
+            translator, code, stopped = turn(request, emit, state, None, api, config.name)
+            if stopped:
+                return
+        if translator.terminal:
+            translator.print_terminal(emit)
+        else:
+            emit.failed("cli_exit", f"MiniMax Code exited with code {code} without a result.")
+    finally:
+        try:
+            os.unlink(config.name)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

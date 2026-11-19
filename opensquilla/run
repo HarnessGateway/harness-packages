@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+"""One turn of OpenSquilla: `opensquilla agent` once, said in Responses events.
+
+OpenSquilla's one-shot command has no streaming stdout: it collects the turn and prints one JSON object at the
+end, which carries the answer, the token counts, the errors and the session key. With `--transcript-path` it
+also writes the session's transcript as JSONL after the turn. That transcript is the only place the CLI makes
+known what each tool was given and what it answered, so `run` reads it and says, in order, the assistant text,
+each tool call with its result, and the end of the turn. It is not live: nothing is known until the CLI ends.
+`run` therefore prints the whole turn when the CLI is done. The README says so.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import ctypes
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from collections import deque
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+VERSION = "0.5.8"
+CLI = os.path.join(os.environ["HG_HARNESS"], "tools", "bin", "opensquilla")
+SESSION_KEY = "agent:main:main"
+DIFF_MAX = 100_000
+MESSAGE_MAX = 2_000
+
+# The provider ids OpenSquilla uses for each API the platform names, and any path the endpoint needs.
+PROVIDERS = {
+    "anthropic": ("anthropic", None),
+    "openai-chat": ("openai", None),
+    "openai-responses": ("openai_responses", None),
+    "gemini": ("gemini", "/v1beta/openai"),
+}
+
+EFFORT = {"none": "off", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
+          "xhigh": "xhigh", "adaptive": "adaptive"}
+
+
+# ── the turn's command and environment ─────────────────────────────────────────────────────────────────────
+
+
+def base_url(api: str, url: str, suffix: str | None) -> str:
+    """The endpoint OpenSquilla wants for this API, from the platform's base URL."""
+    if not suffix:
+        return url
+    url = url.rstrip("/")
+    if url.endswith(suffix):
+        return url
+    if suffix == "/v1beta/openai" and url.endswith("/v1beta"):
+        return url + "/openai"
+    return url + suffix
+
+
+def mcp_config(request, state, emit) -> str | None:
+    """A config file naming the request's MCP servers, when it has any. OpenSquilla's MCP client speaks SSE."""
+    servers = request.mcp_servers
+    if not servers:
+        return None
+    blocks = ["[mcp]", "enabled = true", "connect_timeout_seconds = 10.0", ""]
+    written = 0
+    for server in servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not label or not url:
+            emit.log(f"an MCP tool in the request has no server_label or server_url: {label or '(no label)'}")
+            continue
+        if server.get("headers"):
+            emit.log(f"OpenSquilla's MCP client takes no headers; the request's headers for {label} are not sent")
+        blocks += ["[[mcp.servers]]", f"name = {json.dumps(str(label))}", 'transport = "sse"',
+                   f"url = {json.dumps(str(url))}", "tool_timeout_seconds = 300.0", ""]
+        written += 1
+    if not written:
+        return None
+    folder = os.environ["HG_STATE"]
+    path = os.path.join(folder, "mcp.toml")
+    os.makedirs(folder, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        file.write("\n".join(blocks))
+    return path
+
+
+def environment(request, api: str, state, emit) -> dict[str, str]:
+    """OpenSquilla is told its provider, model and endpoint through OPENSQUILLA_LLM_* and its own options."""
+    provider, suffix = PROVIDERS[api]
+    env = dict(os.environ)
+    env.update({
+        "OPENSQUILLA_TRUST_ENV": "1",            # honour HTTPS_PROXY: the sandbox reaches the world through it
+        "OPENSQUILLA_PRIVACY_DISABLE_NETWORK_OBSERVABILITY": "1",
+        "OPENSQUILLA_TELEMETRY_DISABLED": "1",
+        "OPENSQUILLA_UPDATE_CHECK_DISABLED": "1",
+        "DO_NOT_TRACK": "1",
+        "OPENSQUILLA_SQUILLA_ROUTER_ENABLED": "0",   # the request names one model; do not route away from it
+        "OPENSQUILLA_NAMING_ENABLED": "0",
+        "OPENSQUILLA_OPENROUTER_LIVE_PRICING": "0",   # no price lookup at openrouter.ai for router tiers
+        "OPENSQUILLA_MEMORY_RETRIEVAL_MODE": "fts_only",  # no embedding model, local or remote
+        "OPENSQUILLA_MEMORY__EMBEDDING__PROVIDER": "none",
+        "OPENSQUILLA_MEMORY_SOURCE": "state",            # memory stays in the mind, not in the caller's /work
+        "OPENSQUILLA_LLM_PROVIDER": provider,
+        "OPENSQUILLA_LLM_BASE_URL": base_url(api, os.environ["HG_PROVIDER_URL"], suffix),
+        "OPENSQUILLA_LLM_API_KEY": os.environ["HG_PROVIDER_KEY"],   # a placeholder: the platform's proxy
+        "OPENSQUILLA_LLM_MODEL": os.environ["HG_MODEL"],
+        "PYTHONDONTWRITEBYTECODE": "1",          # /harness is read-only during a turn
+    })
+    body = request.body
+    if isinstance(body.get("max_output_tokens"), int) and body["max_output_tokens"] > 0:
+        env["OPENSQUILLA_LLM_MAX_TOKENS"] = str(body["max_output_tokens"])
+    if isinstance(body.get("temperature"), (int, float)):
+        env["OPENSQUILLA_LLM_TEMPERATURE"] = str(body["temperature"])
+    if isinstance(body.get("top_p"), (int, float)):
+        env["OPENSQUILLA_LLM_TOP_P"] = str(body["top_p"])
+    if isinstance(body.get("text"), dict) and body["text"].get("format"):
+        emit.log("OpenSquilla has no option for the request's text.format; the turn is asked without enforcing it")
+    config = mcp_config(request, state, emit)
+    if config:
+        env["OPENSQUILLA_GATEWAY_CONFIG_PATH"] = config
+    return env
+
+
+def command(request, transcript: str, db: str, brief: str) -> list[str]:
+    args = [CLI, "agent", "-m", brief,
+            "--workspace", os.environ["HG_WORK"],
+            "--permissions", "bypass",              # act without asking, as a headless turn must
+            "--json", "--no-memory-capture", "--event-stream-stderr",
+            "--session-id", SESSION_KEY,
+            "--session-db-path", db,
+            "--transcript-path", transcript,
+            "--model", os.environ["HG_MODEL"]]
+    effort = EFFORT.get((request.effort or "").lower())
+    if effort:
+        args += ["--thinking", effort]
+    return args
+
+
+# ── the CLI, its output, and a stop ───────────────────────────────────────────────────────────────────────
+
+
+_PR_SET_CHILD_SUBREAPER = 36          # <linux/prctl.h>
+
+
+def _keep_what_the_cli_starts() -> None:
+    """Adopt the processes the CLI leaves behind (it runs tools in a process group of their own), so that a
+    stop reaches them. On Linux; elsewhere a stop reaches only the CLI's own process group."""
+    with contextlib.suppress(OSError, AttributeError):
+        ctypes.CDLL(None).prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+
+
+def _descendants(pid: int) -> list[int]:
+    """Every process below this one, from /proc; nothing where there is no /proc."""
+    parents: dict[int, int] = {}
+    try:
+        for entry in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                with open(f"/proc/{entry}/stat", encoding="utf-8") as file:
+                    state, parent = file.read().rpartition(")")[2].split()[:2]
+                if state != "Z":
+                    parents[int(entry)] = int(parent)
+            except OSError:
+                continue
+    except OSError:
+        return []
+    found, above = [], {pid}
+    while above:
+        above = {child for child, parent in parents.items() if parent in above}
+        found.extend(above)
+    return found
+
+
+class Stopped(Exception):
+    pass
+
+
+def run_cli(args: list[str], env: dict[str, str], cwd: str, emit) -> tuple[list[str], list[str], int]:
+    """Run the CLI to its end. On SIGTERM stop it and everything it started, then end `run` silently."""
+    stdout_lines: list[str] = []
+    stderr_tail: deque[str] = deque(maxlen=200)
+    last_beat = [time.monotonic()]
+    _keep_what_the_cli_starts()
+    process = subprocess.Popen(  # noqa: S603 - the command is this package's own
+        args, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", start_new_session=True,
+    )
+    stopped = threading.Event()
+
+    def on_term(*_):
+        stopped.set()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+        def insist():
+            # A process the CLI started may have left its group; make sure none keeps the pipe open.
+            time.sleep(2.0)
+            for pid in _descendants(os.getpid()):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        threading.Thread(target=insist, daemon=True).start()
+
+    previous = signal.signal(signal.SIGTERM, on_term) if threading.current_thread() is threading.main_thread() else None
+
+    def read_stdout():
+        assert process.stdout is not None
+        for line in process.stdout:
+            stdout_lines.append(line.rstrip("\n"))
+
+    def read_stderr():
+        assert process.stderr is not None
+        for line in process.stderr:
+            stderr_tail.append(line.rstrip("\n"))
+            sys.stderr.write(line)                 # the turn's log, as the kit does for the CLI it runs
+            sys.stderr.flush()
+            # Its opt-in progress stream is the only sign of life until the turn's JSON arrives; a log line
+            # every so often keeps the platform's stream from sitting silent for a long turn.
+            if "_event" in line and time.monotonic() - last_beat[0] >= 20.0:
+                last_beat[0] = time.monotonic()
+                try:
+                    emit.log("OpenSquilla is still working")
+                except RuntimeError:
+                    pass
+
+    readers = [threading.Thread(target=read_stdout), threading.Thread(target=read_stderr)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join()
+    code = process.wait()
+    if previous is not None:
+        signal.signal(signal.SIGTERM, previous)
+    if stopped.is_set():
+        # Everything the CLI started has been sent SIGTERM; what it left behind is ours to finish.
+        time.sleep(0.3)                             # let the CLI's orphans be reparented to us
+        for pid in _descendants(os.getpid()):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 2.0
+        while _descendants(os.getpid()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        for pid in _descendants(os.getpid()):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        raise Stopped
+    return stdout_lines, list(stderr_tail), code
+
+
+# ── the CLI's lines in, Responses events out ─────────────────────────────────────────────────────────────
+
+
+def text_of(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return ""
+
+
+def lines_of(text: str, mark: str) -> str:
+    return "".join(f"{mark}{line}\n" for line in str(text).splitlines())[:DIFF_MAX]
+
+
+def payload_of(stdout_lines: list[str]) -> dict | None:
+    for line in reversed(stdout_lines):
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and ("session_key" in value or "status" in value):
+            return value
+    return None
+
+
+def transcript_of(path: str) -> list[dict]:
+    try:
+        with open(path, encoding="utf-8") as file:
+            rows = [json.loads(line) for line in file if line.strip()]
+    except (OSError, ValueError):
+        return []
+    return [row for row in rows if isinstance(row, dict) and isinstance(row.get("message"), dict)]
+
+
+def this_turn(rows: list[dict]) -> list[dict]:
+    """The transcript holds the whole session: the new part follows this turn's user message."""
+    last_user = max((number for number, row in enumerate(rows) if row["message"].get("role") == "user"),
+                    default=None)
+    if last_user is None:
+        return rows
+    return rows[last_user + 1:]
+
+
+class Translator:
+    """OpenSquilla's transcript rows in, Responses items out."""
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.calls: dict[str, tuple[str, dict]] = {}
+
+    def read(self, row: dict) -> None:
+        message = row["message"]
+        role = message.get("role")
+        if role == "assistant":
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    self.emit.say(str(block.get("text", "")))
+                elif block.get("type") == "toolCall":
+                    self.calls[str(block.get("id", ""))] = (str(block.get("name", "")),
+                                                            block.get("arguments") or {})
+        elif role == "toolResult":
+            call_id = str(message.get("toolCallId", ""))
+            name, given = self.calls.pop(call_id, (str(message.get("toolName", "")), {}))
+            if not name:
+                name = str(message.get("toolName", "")) or "tool"
+            self.tool(name, given, text_of(message.get("content")),
+                      bool(message.get("isError")), message.get("executionStatus") or {})
+        elif role == "system":
+            said = text_of(message.get("content"))
+            if said:
+                self.emit.log(said)
+
+    def tool(self, name: str, given: dict, output: str, failed: bool, status: dict) -> None:
+        output = output[:1_000_000]
+        if name.startswith("mcp__") and name.count("__") >= 2:
+            _, server, tool = name.split("__", 2)
+            self.emit.called(server, tool, given, error=output if failed else None,
+                             output=None if failed else output)
+        elif name in ("exec_command", "shell"):
+            command = str(given.get("command") or given.get("cmd") or "")
+            # OpenSquilla prefixes the result with the exit code and merges stdout and stderr.
+            match = re.match(r"exit_code=(-?[0-9]+)\n?", output)
+            code = status.get("exit_code")
+            if match:
+                output = output[match.end():]
+            if not isinstance(code, int):
+                code = int(match.group(1)) if match else (1 if failed else 0)
+            self.emit.ran(command, stdout=output, exit_code=code)
+        elif name == "write_file" and isinstance(given.get("path"), str):
+            self.emit.wrote(given["path"], lines_of(given.get("content", ""), "+"))
+        elif name == "write_scratch" and isinstance(given.get("path"), str):
+            self.emit.wrote(given["path"], lines_of(given.get("content", ""), "+"))
+        elif name in ("edit_file", "edit_source") and isinstance(given.get("path"), str):
+            old = given.get("old_text", given.get("old_string", ""))
+            new = given.get("new_text", given.get("new_string", ""))
+            self.emit.edited(given["path"], (lines_of(old, "-") + lines_of(new, "+"))[:DIFF_MAX])
+        elif name == "apply_patch" and isinstance(given.get("patch"), str):
+            self.patch(given["patch"])
+        elif name == "delete_file" and isinstance(given.get("path"), str):
+            self.emit.deleted(given["path"])
+        else:
+            self.emit.used(name, json.dumps(given, ensure_ascii=False), output)
+
+    def patch(self, patch: str) -> None:
+        """An apply_patch's Begin Patch text, as the file operations it names."""
+        path, kind, added, changed = None, "", [], []
+        found = False
+
+        def flush():
+            nonlocal path, kind, added, changed, found
+            if path is None:
+                return
+            found = True
+            if kind == "add":
+                self.emit.wrote(path, "".join(lines_of(line, "+") for line in added))
+            else:
+                self.emit.edited(path, "".join(changed)[:DIFF_MAX])
+            path, kind, added, changed = None, "", [], []
+
+        for line in patch.splitlines():
+            if line.startswith("*** Add File: "):
+                flush()
+                path, kind = line[len("*** Add File: "):].strip(), "add"
+            elif line.startswith("*** Update File: "):
+                flush()
+                path, kind = line[len("*** Update File: "):].strip(), "update"
+            elif line.startswith("*** Delete File: "):
+                flush()
+                self.emit.deleted(line[len("*** Delete File: "):].strip())
+            elif path is not None and line.startswith("+"):
+                added.append(line[1:])
+                changed.append("+" + line[1:] + "\n")
+            elif path is not None and line.startswith("-"):
+                changed.append("-" + line[1:] + "\n")
+        flush()
+        if not found:
+            self.emit.used("apply_patch", json.dumps({"patch": patch[:DIFF_MAX]}, ensure_ascii=False), "")
+
+    def flush_calls(self) -> None:
+        for name, given in self.calls.values():
+            self.emit.used(name, json.dumps(given, ensure_ascii=False), "")
+        self.calls.clear()
+
+
+def _int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def usage_of(payload: dict) -> dict:
+    counted = payload.get("usage") or {}
+    usage = {
+        "input_tokens": _int(counted.get("input_tokens")),
+        "output_tokens": _int(counted.get("output_tokens")),
+        "input_tokens_details": {"cached_tokens": _int(counted.get("cached_tokens"))},
+    }
+    reasoning = _int(counted.get("reasoning_tokens"))
+    if reasoning:
+        usage["output_tokens_details"] = {"reasoning_tokens": reasoning}
+    return usage
+
+
+def redact(text: str) -> str:
+    key = os.environ.get("HG_PROVIDER_KEY", "")
+    return text.replace(key, "[redacted]") if key else text
+
+
+def failed(emit, payload: dict | None, code: int, stderr_tail: list[str]) -> None:
+    usage = usage_of(payload) if payload else None
+    if payload and payload.get("errors"):
+        messages = [str(error.get("message", "")) for error in payload["errors"] if isinstance(error, dict)]
+        first = payload["errors"][0] if isinstance(payload["errors"][0], dict) else {}
+        name = str(first.get("code") or "provider_error")
+    else:
+        messages, name = [], "cli_exit"
+    if payload and not messages:
+        messages = ["OpenSquilla ended its turn with an error but said no more."]
+    if not payload:
+        said = next((line for line in reversed(stderr_tail) if line.strip()), "")
+        messages = [f"OpenSquilla exited with code {code} without a result."
+                    + (f" It said: {said}" if said else "")]
+    name = name.lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        # An HTTP status such as "400" is not a name the platform takes; the provider is what failed.
+        name = "provider_error" if payload and payload.get("errors") else "cli_error"
+    emit.failed(name, redact(" ".join(messages))[:MESSAGE_MAX], usage)
+
+
+def translate(emit, rows: list[dict], payload: dict | None) -> None:
+    translator = Translator(emit)
+    for row in rows:
+        translator.read(row)
+    translator.flush_calls()
+    if not rows and payload and payload.get("status") == "ok" and payload.get("text"):
+        emit.say(str(payload["text"]))
+    for artifact in (payload or {}).get("artifacts") or []:
+        if isinstance(artifact, dict):
+            emit.log(f"artifact: {artifact.get('name') or artifact.get('id')}")
+
+
+# ── one turn ─────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def recorded(emit, state, path: str) -> None:
+    """Replay a recording of a turn made while it was written: the CLI's stdout and the turn's transcript rows."""
+    try:
+        with open(path, encoding="utf-8") as file:
+            recording = json.load(file)
+    except (OSError, ValueError) as error:
+        emit.failed("replay_error", f"the recorded turn could not be read: {error}")
+        return
+    stdout_lines = [str(line) for line in recording.get("stdout") or []]
+    rows = [row for row in recording.get("transcript") or [] if isinstance(row, dict)]
+    payload = payload_of(stdout_lines)
+    translate(emit, rows, payload)
+    if payload is None:
+        failed(emit, None, int(recording.get("exit_code") or 1), [str(line) for line in recording.get("stderr") or []])
+        return
+    if payload.get("status") == "ok" and not payload.get("errors"):
+        state.set("session", str(payload.get("session_key") or SESSION_KEY))
+        emit.done(usage_of(payload))
+    else:
+        failed(emit, payload, int(recording.get("exit_code") or 1), [str(line) for line in recording.get("stderr") or []])
+
+
+def main() -> None:
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    hgkit.seed()
+
+    replay = os.environ.get("HG_REPLAY")
+    if replay:
+        recorded(emit, state, replay)
+        return
+
+    if not os.access(CLI, os.X_OK):
+        emit.failed("not_installed", f"OpenSquilla {VERSION} is not at {CLI}: the package's install has not run")
+        return
+
+    api = os.environ.get("HG_PROVIDER_API", "")
+    if api not in PROVIDERS:
+        emit.failed("unsupported_api", f"OpenSquilla has no client for the provider's {api or 'no'} API")
+        return
+
+    db = os.path.join(os.environ["HOME"], ".opensquilla", "session.sqlite3")
+    os.makedirs(os.path.dirname(db), exist_ok=True)
+    handle, transcript = tempfile.mkstemp(prefix="opensquilla-", suffix=".jsonl")
+    os.close(handle)
+    try:
+        env = environment(request, api, state, emit)
+        args = command(request, transcript, db, request.brief())
+    except Exception as error:  # noqa: BLE001 - a bad request still ends with a terminal line
+        emit.failed("setup_error", redact(f"the turn could not be prepared: {error}"))
+        return
+
+    state.set("session", SESSION_KEY)
+    try:
+        stdout_lines, stderr_tail, code = run_cli(args, env, os.environ["HG_WORK"], emit)
+    except Stopped:
+        return
+    except OSError as error:
+        emit.failed("cli_not_started", f"OpenSquilla could not be started: {error}")
+        return
+
+    rows = this_turn(transcript_of(transcript))
+    try:
+        os.unlink(transcript)
+    except OSError:
+        pass
+
+    record = os.environ.get("HGKIT_RECORD")
+    if record:
+        try:
+            with open(record, "w", encoding="utf-8") as file:
+                json.dump({"version": 1, "stdout": stdout_lines, "stderr": stderr_tail[-50:],
+                           "transcript": rows, "exit_code": code}, file, ensure_ascii=False)
+        except OSError:
+            pass
+
+    payload = payload_of(stdout_lines)
+    translate(emit, rows, payload)
+    if payload is None:
+        failed(emit, None, code, stderr_tail)
+        return
+    if payload.get("status") == "ok" and not payload.get("errors"):
+        session = payload.get("session_key")
+        if isinstance(session, str) and session:
+            state.set("session", session)
+        emit.done(usage_of(payload))
+    else:
+        failed(emit, payload, code, stderr_tail)
+
+
+if __name__ == "__main__":
+    main()

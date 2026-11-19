@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "aider",
+  "version": "0.86.2-1",
+  "description": "Aider, unmodified.",
+  "mind": ".aider",
+  "cache": [".aider/caches"],
+  "apis": ["openai-chat", "anthropic", "gemini"],
+  "install": { "timeout_s": 1200 },
+  "run": { "stop_grace_s": 15 }
+}

@@ -1,0 +1,2 @@
+{"type": "hg.log", "text": "Error: The model provider rejected the request. (ref: 097a97bc)"}
+{"type": "hg.failed", "code": "provider_error", "message": "The model provider rejected the request.", "usage": {"input_tokens": 0, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 0}}}

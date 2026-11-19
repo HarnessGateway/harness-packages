@@ -1,0 +1,34 @@
+#!/bin/sh
+# Installs OpenCode at a pinned version under $HG_HARNESS/tools, by its makers' documented method (npm).
+# It also puts the plugin package OpenCode loads at start-up in a config directory under tools, read-only at
+# turn time, so a turn never installs anything from npm.
+set -eu
+VERSION=1.19.6
+
+for need in node npm python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: opencode needs Node.js and npm to install, and this package's run needs python3" >&2
+    exit 1
+  }
+done
+
+# npm 12 runs no package's install script unless told to, and earlier npm runs every one. opencode needs its
+# own, which puts the binary for this machine in place, so it runs here by name, and no other does.
+npm install --prefix "$HG_HARNESS/tools/opencode" --no-audit --no-fund --loglevel=error --ignore-scripts \
+  "opencode-ai@$VERSION"
+node "$HG_HARNESS/tools/opencode/node_modules/opencode-ai/postinstall.mjs"
+
+got=$("$HG_HARNESS/tools/opencode/node_modules/.bin/opencode" --version)
+[ "$got" = "$VERSION" ] || { echo "installed opencode $got, wanted $VERSION" >&2; exit 1; }
+echo "opencode $got installed"
+
+# OpenCode loads @opencode-ai/plugin from its global config directory on every start; if it is missing it
+# runs npm in the sandbox during the turn. Put it under tools, where the turn's read-only config points.
+XDG="$HG_HARNESS/tools/opencode-xdg/opencode"
+npm install --prefix "$XDG" --no-audit --no-fund --loglevel=error --ignore-scripts \
+  "@opencode-ai/plugin@$VERSION"
+printf '{"$schema":"https://opencode.ai/config.json"}\n' > "$XDG/opencode.jsonc"
+# OpenCode writes these beside its global config on start-up when they are missing. /harness is read-only
+# during a turn, so they are made here, once; a turn then finds everything it expects.
+printf 'node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n' > "$XDG/.gitignore"
+echo "opencode config directory prepared under $XDG"

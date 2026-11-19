@@ -1,0 +1,14 @@
+{
+  "model": "builder/kimi/deepseek/deepseek-flash",
+  "input": "Call the echo tool with text \"hello\". Then tell me exactly what it returned.",
+  "tools": [
+    {
+      "type": "mcp",
+      "server_label": "echo",
+      "server_url": "http://127.0.0.1:8765/mcp",
+      "allowed_tools": [
+        "echo"
+      ]
+    }
+  ]
+}

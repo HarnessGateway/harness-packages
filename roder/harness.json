@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "roder",
+  "version": "0.4.10-1",
+  "description": "Roder, unmodified.",
+  "mind": ".roder",
+  "cache": [".roder/discovery", ".roder/code-index"],
+  "apis": ["openai-chat", "openai-responses"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 10 }
+}

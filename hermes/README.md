@@ -15,7 +15,10 @@ Hermes Agent, unmodified, at version 0.23.1.
   the environment the install built, by its path, which Hermes uses as it is whatever the home. That is the
   layout of Hermes's own image: one read-only install, any number of homes.
 - **Session:** kept by Hermes in `~/.hermes`; its id is kept in the package's state and resumed with
-  `--resume`.
+  `--resume`. Hermes holds a session whose turn was cut short until that turn is acknowledged, so after a
+  turn that was stopped the package runs `hermes sessions discard` before it resumes: the conversation up to
+  the stopped turn is kept, and what the stopped turn was asked is not replayed. Hermes reports a session's id
+  when a turn ends, so a session whose very first turn was stopped starts again.
 - **Output:** text word by word; its `terminal` tool as shell calls; `write_file` and `patch` as file
   changes; every other tool as a custom tool call.
 - **Request fields honoured:** `instructions`, put in front of the prompt; input files and images (put under
@@ -23,4 +26,4 @@ Hermes Agent, unmodified, at version 0.23.1.
 
 What this package handles for you: Hermes will not resume a session with a different key on its command
 line, so the key is given through the environment; its file tools are told they may write in the work
-folder; no gateway or service of Hermes's is started, only the agent, for one turn.
+folder; no messaging platform, scheduler job or service of Hermes's is set up, only the agent, for one turn.

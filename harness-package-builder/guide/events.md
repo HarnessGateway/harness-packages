@@ -55,7 +55,9 @@ nowhere. A line of the CLI's that is not what you expected goes to `emit.log` to
 | `hg.incomplete` | It stopped short. `reason` is `max_output_tokens` or `content_filter`, nothing else. | `emit.incomplete(reason, usage)` |
 | `hg.failed` | The CLI or the provider failed. `code` is a short lower-case name (letters, digits, `_`); `message` tells a person what went wrong and is never empty. | `emit.failed(code, message, usage)` |
 
-`usage` is optional, in the shape of the Responses `usage` object. Give what the CLI reports:
+### Token usage
+
+`usage` is in the shape of the Responses `usage` object:
 
 ```python
 usage = {"input_tokens": 1200, "output_tokens": 340, "input_tokens_details": {"cached_tokens": 800}}
@@ -63,6 +65,23 @@ usage = {"input_tokens": 1200, "output_tokens": 340, "input_tokens_details": {"c
 
 `input_tokens` counts all input, cached included: a CLI on the Anthropic API reports cache reads and cache
 writes separately, so add them in. `total_tokens` and the details left out are filled in by the platform.
+
+The platform shows the tokens of every turn and sums them for the organization, and it has only what the
+terminal line says: a package that leaves `usage` out runs turns nobody can account for. So a package that
+calls a model reports it. A CLI's counts are often not where its text is. Before leaving `usage` out, look in
+each of these, with the real CLI:
+
+- its output in every format and at every level of detail it has (a `usage`, `result` or `stats` event; a
+  last line; a `--verbose` or debug flag);
+- notifications and answers of a protocol it speaks (for example ACP's `usage_update`, or a `usage` or
+  `_meta` field in the answer to a prompt);
+- what it writes for itself during a turn: a session file, an export, a log, a database in its mind;
+- a command of its own that reports a session's usage or cost.
+
+Counts for the session so far, not the turn, are turned into the turn's by keeping the last total in the
+package's state (`State`) and reporting the difference. The README says where the numbers come from. If the
+CLI gives none anywhere, the README says that, and lists what was looked at. The trial says so whenever a
+finished turn carried none.
 
 Always end with a terminal line. A CLI that exits without saying how it ended is `emit.failed("cli_exit", …)`
 with its exit code in the message. `run` itself exits 0 whenever it printed a terminal line.

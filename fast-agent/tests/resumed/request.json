@@ -1,0 +1,4 @@
+{
+  "model": "builder/fast-agent/deepseek/deepseek-flash",
+  "input": "What did the program print?"
+}

@@ -1,0 +1,11 @@
+{
+  "contract": 1,
+  "name": "dsh",
+  "version": "0.2.2-rc.4-1",
+  "description": "DeepSeek Harness, unmodified.",
+  "mind": ".dsh",
+  "cache": [".dsh/storages/session_projcache"],
+  "apis": ["anthropic"],
+  "install": { "timeout_s": 1800 },
+  "run": { "stop_grace_s": 15 }
+}

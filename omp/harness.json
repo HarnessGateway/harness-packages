@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "name": "omp",
+  "version": "18.22.2-1",
+  "description": "Oh My Pi, unmodified.",
+  "mind": ".omp",
+  "apis": ["anthropic", "openai-chat", "openai-responses", "gemini"],
+  "install": { "timeout_s": 900 },
+  "run": { "stop_grace_s": 20 }
+}

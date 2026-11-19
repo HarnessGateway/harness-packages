@@ -1,0 +1,5 @@
+{
+  "model": "builder/kilo/deepseek/deepseek-flash",
+  "input": "Say hello.",
+  "instructions": "Answer in uppercase and end with an exclamation mark."
+}

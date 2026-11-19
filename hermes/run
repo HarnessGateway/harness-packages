@@ -7,6 +7,7 @@ and one last `result` line with the session's id and the turn's token counts.
 
 import json
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
@@ -112,10 +113,23 @@ def turn(request, emit, state, session):
     return translator, cli.exit_code
 
 
+def acknowledge(session, emit):
+    """Hermes holds a session whose last turn was killed part-way: `hermes chat --resume` refuses it until the
+    lost turn is acknowledged. A turn that was stopped and ended in time leaves nothing to acknowledge, and
+    saying so costs a few seconds."""
+    emit.log(f"The turn before this one did not end; acknowledging it so that session {session} runs again")
+    # Hermes's own command, by the path `install` wrote. What it prints goes to the turn's log.
+    subprocess.run([HERMES, "sessions", "discard", session, "--yes"], env=environment(),  # noqa: S603
+                   stdout=sys.stderr, check=False)
+
+
 def main():
     request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
-    hgkit.seed_mind()
+    hgkit.seed()
     session = state.get("session")
+    if session and state.get("unfinished"):
+        acknowledge(session, emit)
+    state.set("unfinished", "yes")                  # stays in the mind if this turn is stopped part-way
     translator, code = turn(request, emit, state, session)
     if session and not translator.ended and code != 0:
         emit.log(f"Hermes could not resume session {session} (exit code {code}); starting a new one")
@@ -123,6 +137,7 @@ def main():
         translator, code = turn(request, emit, state, None)
     if not translator.ended:
         emit.failed("cli_exit", f"Hermes exited with code {code} without a result.")
+    state.clear("unfinished")
 
 
 if __name__ == "__main__":

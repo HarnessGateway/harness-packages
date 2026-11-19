@@ -1,0 +1,3 @@
+{"jsonrpc":"2.0","result":{"_meta":{"zeroclaw":{"defaultModel":"no-such-model","maxSessions":10,"sessionTimeoutSecs":3600}},"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":false,"sse":false},"promptCapabilities":{"audio":false,"embeddedContext":true,"image":false},"sessionCapabilities":{"close":{},"resume":{}}},"agentInfo":{"name":"zeroclaw-acp","title":"ZeroClaw ACP","version":"0.9.0"},"authMethods":[],"protocolVersion":1},"id":1}
+{"jsonrpc":"2.0","result":{"sessionId":"4b5e9e54-79d0-4dbb-bc99-78aaf108b994","workspaceDir":"/work/.trial/zeroclaw/work"},"id":2}
+{"jsonrpc":"2.0","error":{"code":-32603,"message":"The selected model provider rejected the request. Check the provider configuration and request."},"id":3}

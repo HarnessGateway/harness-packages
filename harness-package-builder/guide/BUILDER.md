@@ -23,8 +23,8 @@ The package you are running from is a complete, working one. Read it before you 
    against the OpenAI SDK's own types and fails the turn on the first bad one.
 6. **No secret enters the sandbox.** The provider's key and every declared secret are placeholders; the
    platform's proxy puts the real value in on the way out, toward the hosts it is bound to and no others.
-7. **The network is the proxy.** A turn reaches its provider, the hosts its package declares, and what its
-   environment allows. Everything else is refused.
+7. **The network is the proxy, and the environment decides.** A turn reaches its provider and what its
+   environment allows. A package adds no host. Everything else is refused.
 
 ## Two kinds of package
 
@@ -33,7 +33,7 @@ The package you are running from is a complete, working one. Read it before you 
 | Is | The CLI as its makers ship it, headless in the sandbox | An organization's agent on that CLI: a purpose, its rules, its tools, its settings |
 | Asked as | A CLI's name and nothing else ("a harness package for aider") | A purpose, a team, a restriction ("an agent that…", "harden codex for…") |
 | Questions | None: build it | One round, then a plan, then a go |
-| Adds | Nothing | In the same package: instructions, the CLI's own permission rules, settings, secrets, declared hosts, and a refused action shown refused |
+| Adds | Nothing | In the same package: instructions, the CLI's own permission rules, settings, secrets, the hosts its environment must allow (listed in the README), and a refused action shown refused |
 
 Either way the answer is **one package**, in one folder, `/work/<name>/`. A tailored package installs and runs
 the CLI itself; never deliver a vanilla package beside it. When you cannot tell which is wanted, ask one
@@ -88,6 +88,7 @@ The network you have while building is yours. The harness you write gets only wh
 
 - the latest stable release, and how it is installed on Linux at a pinned version;
 - its headless mode, and its machine-readable output (JSON lines, a stream);
+- where it makes known the tokens a turn used (its output, a protocol's notifications, a file it writes);
 - how it is told a provider's base URL, key and model, and which provider APIs it speaks;
 - where it keeps its sessions under `$HOME`, and how one is continued by id;
 - how it is told to act without asking, and how updates and telemetry are turned off;
@@ -100,7 +101,8 @@ python3 /harness/guide/trial.py install /work/<name>
 ```
 
 It lays the package out as the platform does and runs its `install` there, and lists every host the install
-asked for. Hosts marked `REFUSED`, and hosts outside the registries list, go in `install.egress`.
+asked for. Hosts marked `REFUSED`, and hosts outside the registries list, are ones an environment must name
+in its `setup.egress` before this package installs there: they go in the README.
 
 **3. Run the CLI by hand and look at what it prints.** It is now under `/work/.trial/<name>/harness/tools`.
 Run it headless against this session's provider (`HG_PROVIDER_URL`, `HG_PROVIDER_KEY`, `HG_MODEL`; the key
@@ -129,7 +131,8 @@ recorded output under `tests/<case>/`. Record at least: `hello` (text only), `co
 a resumed turn, and a turn the provider or the CLI fails (name a model that does not exist with
 `--set HG_MODEL=no-such-model`).
 
-The hosts each turn asked for, beyond the provider's, are `run.egress`.
+The hosts each turn asked for, beyond the provider's, are ones an environment must allow (`network.allow`)
+for the CLI to reach them: they go in the README, each with whether the CLI works without it.
 
 **6. Check it with the platform's own checker.**
 
@@ -149,7 +152,7 @@ held to those files: run it last, and after every change.
 
 What it is; what it needs from the image and the provider; the CLI's command; which request fields go where
 and which the CLI cannot honour; what is printed for each thing the CLI does; how its session is continued;
-the hosts it declares and why; what an operator must set; what you could not try. For a tailored package
+the hosts an environment must allow and why; what an operator must set; what you could not try. For a tailored package
 also: its purpose, and a "may and may not" table that states only what you showed in a trial.
 
 ## Before you hand over
@@ -159,15 +162,27 @@ also: its purpose, and a "may and may not" table that states only what you showe
   version it got, and names no CPU architecture.
 - Exactly one terminal line, last, in every case; a CLI or provider error is `emit.failed` with a message a
   person can act on, never a silent exit.
+- A finished turn of a package that calls a model carries its token usage on the terminal line; the README
+  says where the numbers come from, or everything you looked at when the CLI gives none (`events.md`,
+  "Token usage").
 - The CLI's session id is saved with `state.set` the moment the CLI reports it, and a stopped turn is
-  continued by the next.
-- `install.egress` and `run.egress` are the hosts you saw asked for, and nothing more.
+  continued by the next. The trial's `--stop-after` turn ended within its grace and printed no terminal line;
+  where the CLI needs longer to end cleanly (it runs its work in a process of its own), `run.stop_grace_s`
+  says how long.
+- `run` and the CLI write nothing under `/harness` during a turn: it is read-only there, as it is in the
+  trial. What a CLI wants to write beside its own files (state, a lock, a config it rewrites) goes to the mind,
+  by the CLI's own option or variable for that.
+- The mind after a trial holds the session and little else. What the CLI makes again by itself (a download
+  cache, libraries it unpacks, a catalogue) is turned off, or named in the manifest's `cache`: the trial shows
+  what the mind holds, largest first.
+- The README lists the hosts you saw the install and the turns ask for, beyond the registries and the
+  provider, and nothing more; the manifest names none.
 - No key, token or placeholder is in any file of the package, recordings included.
 - `/work/<name>/` holds the package and nothing else.
 
 ## Handing over
 
-End with a short summary: the version you pinned; the hosts declared and why; what maps to what; how the
+End with a short summary: the version you pinned; the hosts an environment must allow and why; what maps to what; how the
 session continues; what the operator must set (settings, secrets, an environment or image); what you could
 not try here. Then tell the person how it becomes a harness:
 

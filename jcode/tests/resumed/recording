@@ -1,0 +1,18 @@
+{"model":"deepseek-flash","provider":"Claude","session_id":"session_hare_1795005703317_243e75bb244f305c","type":"start"}
+{"connection":"https/sse","type":"connection_type"}
+{"phase":"sending request","type":"connection_phase"}
+{"phase":"waiting for response","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"text":"The","type":"text_delta"}
+{"text":" program","type":"text_delta"}
+{"text":" printed","type":"text_delta"}
+{"text":":\n\n","type":"text_delta"}
+{"text":"```\n","type":"text_delta"}
+{"text":"hello","type":"text_delta"}
+{"text":"\n","type":"text_delta"}
+{"text":"```","type":"text_delta"}
+{"stop_reason":"end_turn","type":"message_end"}
+{"cache_creation_input":0,"cache_read_input":9728,"input":187,"output":9,"type":"tokens"}
+{"cache_creation_input":0,"cache_read_input":9728,"input":187,"output":9,"type":"tokens"}
+{"connection_phase":"streaming","connection_type":"https/sse","model":"deepseek-flash","provider":"Claude","reported_service_tier":null,"requested_service_tier":null,"served_service_tier":null,"service_tier_report_status":"not_reported","session_id":"session_hare_1795005703317_243e75bb244f305c","status_detail":null,"text":"The program printed:\n\n```\nhello\n```","type":"done","upstream_provider":null,"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":9728,"input_tokens":187,"output_tokens":9}}

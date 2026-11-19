@@ -1,0 +1,26 @@
+#!/bin/sh
+# Installs Kimi Code CLI at a pinned version under $HG_HARNESS/tools, by its makers' documented npm method.
+set -eu
+VERSION=2.6.3
+
+for need in node npm; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: Kimi Code CLI needs Node.js 22.19 or later" >&2
+    exit 1
+  }
+done
+
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' || {
+  echo "this image's Node.js is $(node --version); Kimi Code CLI needs 22.19 or later" >&2
+  exit 1
+}
+
+# The package's only install script is a global-install shim cleanup: npm 12 runs no package's scripts unless
+# told to, and this install is not global, so the script is a no-op here. --ignore-scripts keeps the install
+# identical on npm 12 and earlier npm.
+npm install --prefix "$HG_HARNESS/tools" --no-audit --no-fund --loglevel=error --ignore-scripts \
+  "@moonshot-ai/kimi-code@$VERSION"
+
+got=$("$HG_HARNESS/tools/node_modules/.bin/kimi" --version)
+[ "$got" = "$VERSION" ] || { echo "installed Kimi Code CLI $got, wanted $VERSION" >&2; exit 1; }
+echo "Kimi Code CLI $got installed"

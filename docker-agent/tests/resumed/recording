@@ -1,0 +1,34 @@
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.798748722Z","type":"hook_started","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","hook_event":"session_start"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.799243128Z","type":"hook_finished","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","hook_event":"session_start","duration_ms":0,"allowed":true}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.857204806Z","type":"team_info","available_agents":[{"name":"root","description":"Docker Agent","provider":"anthropic","model":"deepseek-flash","execution_capabilities":{"mode":"native","tool_execution":"docker-agent","tool_approval":"docker-agent-policy","budget_supported":true,"compaction_supported":true,"mid_turn_steering_supported":true,"prompt_hook_context_supported":true}}],"current_agent":"root"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.857246454Z","type":"mcp_init_started"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.858868404Z","type":"mcp_init_finished"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.858870649Z","type":"toolset_info","available_tools":4,"loading":false}
+{"timestamp":"2026-11-18T11:05:48.858905817Z","type":"user_message","message":"What did the program print?","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","session_position":8}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.858909174Z","type":"stream_started","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.858913977Z","type":"mcp_init_started"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.859691304Z","type":"mcp_init_finished"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.859692015Z","type":"toolset_info","available_tools":4,"loading":false}
+{"timestamp":"2026-11-18T11:05:48.859696249Z","type":"agent_info","agent_name":"root","model":"anthropic/deepseek-flash","description":"Docker Agent"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.859715455Z","type":"hook_started","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","hook_event":"turn_start"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:48.859801261Z","type":"hook_finished","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","hook_event":"turn_start","duration_ms":0,"allowed":true}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.7531594Z","type":"agent_choice","content":"It","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.766169762Z","type":"agent_choice","content":" printed","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.781042544Z","type":"agent_choice","content":":\n\n","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.781045597Z","type":"agent_choice","content":"```\n","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.781047712Z","type":"agent_choice","content":"hello","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.781112267Z","type":"agent_choice","content":"\n","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.781113202Z","type":"agent_choice","content":"```\n\n","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.781113755Z","type":"agent_choice","content":"A","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.800166572Z","type":"agent_choice","content":" single","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.800168933Z","type":"agent_choice","content":" line","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.809696542Z","type":"agent_choice","content":" of","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.809699187Z","type":"agent_choice","content":" lowercase","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.82746768Z","type":"agent_choice","content":" text","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.827470253Z","type":"agent_choice","content":" with","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.838996378Z","type":"agent_choice","content":" no","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.839036435Z","type":"agent_choice","content":" punctuation","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.857150303Z","type":"agent_choice","content":".","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","message_id":"2fd9710e-81b1-41b4-ab72-45602b6148e7"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.871755555Z","type":"message_added","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6"}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.871760308Z","type":"token_usage","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","usage":{"input_tokens":1614,"output_tokens":18,"context_length":1632,"context_limit":0,"cost":0,"last_message":{"input_tokens":206,"output_tokens":18,"cached_input_tokens":1408,"cached_write_tokens":0,"Cost":0,"Model":"anthropic/deepseek-flash","finish_reason":"stop"}}}
+{"agent_name":"root","timestamp":"2026-11-18T11:05:49.871819612Z","type":"stream_stopped","session_id":"hg-03d32d87abbb4629965b28b6ccef06a6","reason":"normal","finish_reason":"stop"}

@@ -1,0 +1,4 @@
+{
+  "model": "builder/kilo/deepseek/deepseek-flash",
+  "input": "Count from 1 to 200, one number per line."
+}

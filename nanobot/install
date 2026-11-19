@@ -1,0 +1,29 @@
+#!/bin/sh
+# Installs nanobot at a pinned version under $HG_HARNESS/tools, by its makers' documented method: pip into
+# an isolated virtual environment (the same wheel the `uv tool install nanobot-ai` route installs).
+set -eu
+VERSION=0.4.1
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "this image has no python3: nanobot needs Python 3.11 or later" >&2
+  exit 1
+}
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
+  echo "this image's python3 is $(python3 -V 2>&1); nanobot needs Python 3.11 or later" >&2
+  exit 1
+}
+
+VENV="$HG_HARNESS/tools/venv"
+python3 -m venv "$VENV"
+"$VENV/bin/python" -m pip install --quiet --disable-pip-version-check --no-cache-dir --no-input \
+  "nanobot-ai==$VERSION"
+
+got=$("$VENV/bin/nanobot" --version 2>&1 | awk '{print $NF}' | sed 's/^v//')
+[ "$got" = "$VERSION" ] || { echo "installed nanobot $got, wanted $VERSION" >&2; exit 1; }
+
+# What this package's run needs besides the command: the makers' SDK and the hook interface it drives.
+"$VENV/bin/python" -I -c 'from nanobot import Nanobot; from nanobot.agent.hook import AgentHook' || {
+  echo "nanobot $VERSION is installed but its Python SDK cannot be imported: the package cannot run turns" >&2
+  exit 1
+}
+echo "nanobot $got installed at $VENV"

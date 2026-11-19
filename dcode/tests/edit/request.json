@@ -1,0 +1,4 @@
+{
+  "model": "builder/dcode/deepseek/deepseek-flash",
+  "input": "Create notes.txt containing exactly alpha. Then use your edit tool (not the shell) to change alpha to beta. Then read notes.txt."
+}

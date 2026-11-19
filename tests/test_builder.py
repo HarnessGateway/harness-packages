@@ -57,7 +57,7 @@ for line in cli.lines():
     emit.say(line + "\\n")
 if cli.exit_code == 0:
     emit.done()
-elif not cli.stopped:
+else:
     emit.failed("command_failed", f"The command exited with code {cli.exit_code}.")
 """
 
@@ -142,11 +142,79 @@ def test_a_placeholder_in_what_run_prints_is_called_out(tmp_path: Path, package:
     assert "placeholder" in tried.stdout
 
 
+def test_a_turn_that_calls_a_model_and_counts_no_tokens_is_called_out(tmp_path: Path, package: Path) -> None:
+    # The platform shows the tokens of every turn. A CLI's counts are easy to miss (a file it writes, a flag),
+    # so the trial says when a finished turn carried none; a package that calls no model has none to carry.
+    _trial(tmp_path, "install", str(package))
+    assert "no token usage" not in _trial(tmp_path, "turn", str(package), "echo hi").stdout
+
+    manifest = json.loads((package / "harness.json").read_text())
+    (package / "harness.json").write_text(json.dumps({**manifest, "apis": ["anthropic"]}))
+    model = {"HG_PROVIDER_KEY": "hgs_" + "0" * 32, "HG_PROVIDER_API": "anthropic"}
+    silent = _trial(tmp_path, "turn", str(package), "echo hi", env=model)
+    assert (silent.returncode, "no token usage" in silent.stdout) == (0, True), silent.stdout
+
+    failed = _trial(tmp_path, "turn", str(package), "exit 3", env=model)        # a failure may come before any token
+    assert "no token usage" not in failed.stdout
+
+    (package / "run").write_text(RUN.replace("emit.done()", 'emit.done({"input_tokens": 12, "output_tokens": 3})'))
+    counted = _trial(tmp_path, "turn", str(package), "echo hi", env=model)
+    assert (counted.returncode, "no token usage" in counted.stdout) == (0, False), counted.stdout
+
+
 def test_a_stopped_turn_is_stopped_the_way_the_platform_stops_one(tmp_path: Path, package: Path) -> None:
     _trial(tmp_path, "install", str(package))
     tried = _trial(tmp_path, "turn", str(package), "echo started; sleep 60", "--stop-after", "1")
     assert "stopping it after 1 seconds" in tried.stderr
     assert "started" in (tmp_path / "builder-work" / ".trial" / "my-shell" / "turn" / "recording").read_text()
+    assert "stopped: run ended and printed no terminal line, as a stopped turn does" in tried.stdout
+    assert tried.returncode == 0, tried.stdout + tried.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes where no one may: run as another user")
+def test_a_turn_cannot_write_into_the_package_s_install_as_on_the_platform(tmp_path: Path, package: Path) -> None:
+    # /harness is read-only during a turn. A CLI that keeps state beside its own files works in a trial that
+    # leaves the folder writable, and fails on the platform.
+    _trial(tmp_path, "install", str(package))
+    tried = _trial(tmp_path, "turn", str(package),
+                   'mkdir -p "$HG_HARNESS/tools/state" 2>/dev/null && echo WROTE || echo REFUSED; '
+                   '(echo x > "$HG_HARNESS/run") 2>/dev/null && echo WROTE || echo REFUSED')
+    assert tried.returncode == 0, tried.stdout + tried.stderr
+    said = (tmp_path / "builder-work" / ".trial" / "my-shell" / "turn" / "recording").read_text()
+    assert said.split() == ["REFUSED", "REFUSED"]
+    again = _trial(tmp_path, "install", str(package))                    # an install may write there again
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
+_LAST_WORDS = """#!/usr/bin/env python3
+import signal, sys, time
+
+def stopped(*_):
+    print('{"type": "hg.failed", "code": "stopped", "message": "the turn was stopped"}', flush=True)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, stopped)
+time.sleep(60)
+"""
+
+
+def test_a_stopped_turn_that_prints_a_terminal_line_is_wrong(tmp_path: Path, package: Path) -> None:
+    (package / "run").write_text(_LAST_WORDS)
+    _trial(tmp_path, "install", str(package))
+    tried = _trial(tmp_path, "turn", str(package), "anything", "--stop-after", "1")
+    assert "WRONG: a stopped turn prints no terminal line" in tried.stdout
+    assert tried.returncode == 1
+
+
+def test_a_turn_says_what_it_left_in_the_mind_largest_first(tmp_path: Path, package: Path) -> None:
+    # What a CLI can make again (a download cache, unpacked libraries) belongs in the manifest's `cache`, or is
+    # turned off: the builder has to see it to decide.
+    _trial(tmp_path, "install", str(package))
+    tried = _trial(tmp_path, "turn", str(package),
+                   "mkdir -p ~/.agent/cache ~/.agent/sessions; head -c 3000000 /dev/zero > ~/.agent/cache/blob; "
+                   "echo s > ~/.agent/sessions/one; echo hi")
+    assert tried.returncode == 0, tried.stdout + tried.stderr
+    assert "the mind holds 3.0 MB: .agent/cache 3.0 MB" in tried.stdout
 
 
 class _Proxy:

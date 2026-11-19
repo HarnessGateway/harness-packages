@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "name": "openhands",
+  "version": "1.62.0-1",
+  "description": "The OpenHands Software Agent SDK's default agent, unmodified.",
+  "mind": ".openhands",
+  "apis": ["openai-chat", "openai-responses", "anthropic", "gemini"],
+  "install": { "timeout_s": 1800 },
+  "run": { "stop_grace_s": 15 }
+}

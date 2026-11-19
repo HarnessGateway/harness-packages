@@ -1,7 +1,7 @@
 {
   "contract": 1,
   "name": "pi",
-  "version": "1.5.2-1",
+  "version": "1.5.2-2",
   "description": "pi, unmodified.",
   "mind": ".pi",
   "apis": ["anthropic", "openai-responses", "openai-chat"],

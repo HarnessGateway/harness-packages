@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""One turn of Grok Build (xAI's grok CLI): run it headless and say in Responses events what it does.
+
+Headless with `--output-format streaming-json` prints one JSON object per line: text and thought pieces, ACP tool
+calls and their updates, a plan or a compaction notice now and then, one `usage` line per model response, and a
+last `end` line carrying the session id and the turn's token totals.
+"""
+
+import json
+import os
+import re
+import sys
+import tempfile
+import uuid
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+GROK = os.path.join(os.environ["HG_HARNESS"], "tools", "bin", "grok")
+MODEL_ENTRY = "harness-model"
+DIFF_MAX = 100_000
+OUTPUT_MAX = 2_000_000          # a line the platform accepts is well under 16 MiB
+
+EXECUTE = {"run_terminal_command", "run_terminal_cmd", "bash", "shell"}
+WRITE = {"write"}
+EDIT = {"search_replace", "edit", "hashline_edit", "apply_patch"}
+DELETE = {"delete_file", "delete"}
+EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def toml_str(value):
+    """A TOML basic string for any text the request can carry."""
+    out = ['"']
+    for char in str(value):
+        if char == "\\":
+            out.append("\\\\")
+        elif char == '"':
+            out.append('\\"')
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            out.append(f"\\u{ord(char):04X}")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
+
+
+def toml_key(key):
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else toml_str(key)
+
+
+def base_url_and_backend(api):
+    """The platform's base URL in the form Grok's model config wants, and the backend that speaks it."""
+    url = os.environ["HG_PROVIDER_URL"].rstrip("/")
+    if api == "anthropic":
+        return url + "/v1", "messages"          # Grok appends /messages to a base that has /v1
+    if api == "openai-responses":
+        return url, "responses"
+    return url, "chat_completions"              # openai-chat, the CLI's default backend
+
+
+def mcp_label(server, taken):
+    """A `[mcp_servers.<name>]` key Grok accepts: starts with a letter or _, then letters, digits, _ and -."""
+    label = re.sub(r"[^A-Za-z0-9_-]", "_", server.get("server_label") or "")
+    if not label or not re.match(r"[A-Za-z_]", label):
+        label = "mcp_" + label
+    base, number = label, 2
+    while label in taken:
+        label = f"{base}_{number}"
+        number += 1
+    taken.add(label)
+    return label
+
+
+def config_text(request):
+    """The CLI's config.toml for this turn: the request's provider and model, and its MCP servers."""
+    body = request.body
+    os.makedirs(os.path.join(os.environ["HOME"], ".grok"), exist_ok=True)
+    url, backend = base_url_and_backend(os.environ["HG_PROVIDER_API"])
+    lines = [
+        "# Written by the grok harness from this turn's request; it is replaced on the next turn.",
+        "[cli]",
+        "auto_update = false",
+        "",
+        "[features]",
+        "telemetry = false",
+        "",
+        "[models]",
+        f"default = {toml_str(MODEL_ENTRY)}",
+        "",
+        f"[model.{MODEL_ENTRY}]",
+        f"model = {toml_str(os.environ['HG_MODEL'])}",
+        f"base_url = {toml_str(url)}",
+        f"name = {toml_str(os.environ['HG_MODEL'])}",
+        f"api_backend = {toml_str(backend)}",
+        'env_key = "HG_PROVIDER_KEY"',           # the platform's placeholder: the proxy puts the real key in
+        "context_window = 200000",
+    ]
+    if backend == "messages":
+        # The Messages API authenticates with x-api-key, which the model's env_http_headers fills from the
+        # placeholder variable every turn. Grok also sends a Bearer header; Anthropic ignores it.
+        lines.append('env_http_headers = { "x-api-key" = "HG_PROVIDER_KEY" }')
+        lines.append('extra_headers = { "anthropic-version" = "2023-06-01" }')
+    if isinstance(body.get("max_output_tokens"), int) and body["max_output_tokens"] > 0:
+        lines.append(f"max_completion_tokens = {body['max_output_tokens']}")
+    if isinstance(body.get("temperature"), (int, float)):
+        lines.append(f"temperature = {float(body['temperature'])}")
+    if isinstance(body.get("top_p"), (int, float)):
+        lines.append(f"top_p = {float(body['top_p'])}")
+    taken = set()
+    for server in request.mcp_servers:
+        if not server.get("server_url"):
+            continue
+        label = mcp_label(server, taken)
+        lines += ["", f"[mcp_servers.{toml_key(label)}]", f"url = {toml_str(server['server_url'])}"]
+        headers = server.get("headers")
+        if isinstance(headers, dict) and headers:
+            pairs = ", ".join(f"{toml_key(str(name))} = {toml_str(value)}" for name, value in headers.items())
+            lines.append(f"headers = {{ {pairs} }}")
+    return "\n".join(lines) + "\n"
+
+
+def command(request, session, fresh):
+    args = [GROK, "-m", MODEL_ENTRY, "--output-format", "streaming-json", "--yolo",
+            "--no-auto-update"]
+    args += ["-s" if fresh else "-r", session]
+    if request.instructions:
+        args += ["--rules", request.instructions]
+    effort = (request.effort or "").lower()
+    if effort in EFFORTS:
+        args += ["--reasoning-effort", effort]
+    given = request.body.get("text")
+    fmt = given.get("format") if isinstance(given, dict) else None
+    if isinstance(fmt, dict) and fmt.get("type") == "json_schema" and isinstance(fmt.get("schema"), dict):
+        args += ["--json-schema", json.dumps(fmt["schema"])]
+    return args
+
+
+def environment():
+    env = dict(os.environ)
+    env["GROK_DISABLE_AUTOUPDATER"] = "1"
+    return env
+
+
+def marked(text, mark):
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+def text_of(content, raw):
+    """The text a tool call produced, from its ACP content blocks or, failing that, its raw output."""
+    pieces = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        inside = block.get("content")
+        if isinstance(inside, dict) and isinstance(inside.get("text"), str):
+            pieces.append(inside["text"])
+    if not pieces and isinstance(raw, dict):
+        for name in ("tool_output_for_prompt", "output_for_prompt", "content"):
+            if isinstance(raw.get(name), str):
+                pieces.append(raw[name])
+                break
+    return "\n".join(piece for piece in pieces if piece)[:OUTPUT_MAX]
+
+
+def diffs_of(content, given):
+    """The minus/plus lines of a file operation, from its ACP diff blocks or its own old/new strings."""
+    pieces = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") == "diff":
+            old, new = block.get("oldText") or "", block.get("newText") or ""
+            pieces.append(marked(old, "-") + marked(new, "+"))
+    if not pieces:
+        old = given.get("old_string") or ""
+        new = given.get("new_string")
+        if not isinstance(new, str):
+            new = given.get("content") if isinstance(given.get("content"), str) else ""
+        if old or new:
+            pieces.append(marked(old, "-") + marked(new, "+"))
+    return "".join(pieces)[:DIFF_MAX]
+
+
+def path_of(given, content, locations):
+    """The path the CLI reported for a file operation, as it reported it."""
+    for name in ("file_path", "path", "target_file", "absolute_path"):
+        if isinstance(given.get(name), str) and given[name]:
+            return given[name]
+    for block in content or []:
+        if isinstance(block, dict) and isinstance(block.get("path"), str):
+            return block["path"]
+    for place in locations or []:
+        if isinstance(place, dict) and isinstance(place.get("path"), str):
+            return place["path"]
+    return ""
+
+
+def mcp_of(name, given):
+    """(server, tool, arguments) when the call is an MCP invocation, else None. Grok routes MCP tools through its
+    `use_tool` meta-tool, naming the target `server__tool`; a call may also arrive under that name directly."""
+    target, arguments = name, given
+    if name == "use_tool" and isinstance(given, dict) and isinstance(given.get("tool_name"), str):
+        target, arguments = given["tool_name"], given.get("tool_input") or {}
+    if "__" in target:
+        server, _, tool = target.partition("__")
+        if server and tool:
+            return server, tool, arguments
+    return None
+
+
+class Translator:
+    """Grok Build's streaming-json lines in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}                 # toolCallId -> call being followed
+        self.end = None                 # the terminal `end` line
+        self.error = None               # an `error` line
+        self.error_usage = None         # spend fields an `error` line carries, when the CLI has them
+        self.printed = 0                # output items printed, so a failed resume can be retried cleanly
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        kind = event.get("type")
+        if kind == "text":
+            self.say(event.get("data"))
+        elif kind == "thought":
+            self.think(event.get("data"))
+        elif kind == "tool_call":
+            self.calls[event.get("toolCallId") or ""] = {
+                "name": event.get("toolName") or "", "kind": event.get("kind") or "",
+                "input": event.get("rawInput") if isinstance(event.get("rawInput"), dict) else {},
+                "content": event.get("content") or [], "raw": None,
+                "status": event.get("status") or "",
+            }
+            if event.get("status") in ("completed", "failed"):
+                self.finish(event.get("toolCallId") or "", event.get("status"))
+        elif kind == "tool_call_update":
+            call = self.calls.setdefault(event.get("toolCallId") or "", {
+                "name": "", "kind": "", "input": {}, "content": [], "raw": None, "status": ""})
+            if event.get("content"):
+                call["content"] = event["content"]
+            if event.get("rawOutput") is not None:
+                call["raw"] = event["rawOutput"]
+            if event.get("locations"):
+                call["locations"] = event["locations"]
+            status = event.get("status")
+            if status:
+                call["status"] = status
+            if status in ("completed", "failed"):
+                self.finish(event.get("toolCallId") or "", status)
+        elif kind == "plan":
+            self.emit.log(("plan: " + json.dumps(event.get("entries")))[:2000])
+        elif kind == "end":
+            self.end = event
+            session = event.get("sessionId")
+            if session:
+                self.state.set("session", session)
+        elif kind == "error":
+            self.error = str(event.get("message") or "Grok Build reported an error")
+            if isinstance(event.get("usage"), dict):
+                self.error_usage = event["usage"]
+        elif kind == "max_turns_reached":
+            self.emit.log("Grok Build reached the maximum number of turns")
+        elif kind == "available_commands" or kind == "usage":
+            pass                                   # the CLI's own bookkeeping; tokens come from `end`
+        elif kind:
+            self.emit.log(json.dumps(event)[:2000])
+
+    def say(self, text):
+        if isinstance(text, str) and text:
+            self.printed += 1
+            self.emit.say(text)
+
+    def think(self, text):
+        if isinstance(text, str) and text:
+            self.printed += 1
+            self.emit.think(text)
+
+    def finish(self, call_id, status):
+        call = self.calls.pop(call_id, None)
+        if call is None:
+            return
+        name, given = call["name"], call["input"]
+        content, raw = call["content"], call["raw"]
+        failed = status == "failed"
+        output = text_of(content, raw)
+        if name in EXECUTE or call["kind"] == "execute":
+            if isinstance(raw, dict) and isinstance(raw.get("exit_code"), int):
+                stdout, stderr, exit_code = output, "", raw["exit_code"]
+            elif failed:
+                stdout, stderr, exit_code = "", output, 1
+            else:
+                stdout, stderr, exit_code = output, "", 0
+            self.printed += 1
+            self.emit.ran(given.get("command", ""), stdout=stdout, stderr=stderr, exit_code=exit_code)
+        elif name in WRITE or call["kind"] == "write":
+            self.printed += 1
+            self.emit.wrote(path_of(given, content, call.get("locations")), diffs_of(content, given))
+        elif name in EDIT or call["kind"] == "edit":
+            self.printed += 1
+            self.emit.edited(path_of(given, content, call.get("locations")), diffs_of(content, given))
+        elif name in DELETE or call["kind"] == "delete":
+            self.printed += 1
+            self.emit.deleted(path_of(given, content, call.get("locations")))
+        elif mcp_of(name, given) is not None:
+            server, tool, arguments = mcp_of(name, given)
+            self.printed += 1
+            self.emit.called(server, tool, arguments,
+                             output=None if failed else output, error=output if failed else None)
+        else:
+            self.printed += 1
+            self.emit.used(name or call["kind"] or "tool", json.dumps(given)[:OUTPUT_MAX], output)
+
+    def flush(self):
+        """Tool calls the CLI never closed: print what is known, in the order they arrived."""
+        for call_id in list(self.calls):
+            self.finish(call_id, self.calls[call_id].get("status") or "completed")
+
+    def usage(self, counted=None):
+        counted = counted if isinstance(counted, dict) else ((self.end or {}).get("usage") or {})
+        cached = counted.get("cache_read_input_tokens") or 0
+        created = counted.get("cache_creation_input_tokens") or 0
+        return {
+            "input_tokens": (counted.get("input_tokens") or 0) + cached + created,
+            "output_tokens": counted.get("output_tokens") or 0,
+            "input_tokens_details": {"cached_tokens": cached},
+        }
+
+    def terminal(self):
+        """Print the one terminal line, or None when the run said nothing that ends a turn."""
+        if self.end is not None:
+            reason = self.end.get("stopReason") or "end_turn"
+            if reason == "max_tokens":
+                return self.emit.incomplete("max_output_tokens", self.usage())
+            if reason == "refusal":
+                return self.emit.incomplete("content_filter", self.usage())
+            if reason == "cancelled":
+                return self.emit.failed("cancelled", "Grok Build cancelled the run before it finished.", self.usage())
+            if reason == "max_turn_requests":
+                self.emit.log("Grok Build stopped at its maximum number of turns")
+            if reason not in ("end_turn", "max_turn_requests"):
+                self.emit.log(f"Grok Build ended with stop reason {reason!r}")
+            return self.emit.done(self.usage())
+        if self.error:
+            code, message = error_terminal(self.error)
+            return self.emit.failed(code, message, self.usage(self.error_usage) if self.error_usage else None)
+        return None
+
+
+def session_gone(message):
+    """Whether an error says the session to resume is not there (a stopped turn can leave it unusable)."""
+    return re.search(r"no session|session does not exist|session not found|couldn'?t start session|"
+                     r"failed to resume", message, re.IGNORECASE) is not None
+
+
+def error_terminal(message):
+    """A failed line's (code, message) from an `error` line's text, which often nests the provider's own JSON."""
+    clean = message.strip()
+    nested = clean.partition("Internal error:")[2].strip() if "Internal error:" in clean else ""
+    if nested.startswith("{"):
+        try:
+            inner = json.loads(nested)
+            if isinstance(inner, dict) and isinstance(inner.get("message"), str):
+                clean = inner["message"]
+        except ValueError:
+            pass
+    if clean.startswith("Error: "):
+        clean = clean[7:]
+    code = "provider_error" if re.search(r"API error|http_status|status \d\d\d", clean) else "cli_error"
+    return code, (clean or "Grok Build failed without saying why")[:2000]
+
+
+def turn(request, emit, state, session, fresh):
+    """Run the CLI once. Returns (translator, exit code)."""
+    hgkit.seed()
+    config = config_text(request)
+    with open(os.path.join(os.environ["HOME"], ".grok", "config.toml"), "w", encoding="utf-8") as file:
+        file.write(config)
+
+    prompt = request.brief(instructions=False)
+    if not fresh and request.instructions:
+        # Grok Build folds --rules into the system prompt only when it creates a session; a resumed session keeps
+        # its original prompt. The instructions of this request still go in front of what the agent is asked.
+        prompt = f"Instructions for this request:\n{request.instructions}\n\n{prompt}"
+    handle, prompt_file = tempfile.mkstemp(prefix="grok-prompt-", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8") as file:
+        file.write(prompt)
+
+    translator = Translator(emit, state)
+    try:
+        cli = hgkit.Cli(command(request, session, fresh) + ["--prompt-file", prompt_file], env=environment())
+        for line in cli.lines():
+            translator.read(line)
+        code = cli.exit_code
+    finally:
+        try:
+            os.unlink(prompt_file)
+        except OSError:
+            pass
+    return translator, code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    session = state.get("session")
+    fresh = not session
+    if fresh:
+        session = str(uuid.uuid4())
+        state.set("session", session)          # chosen here, so a stopped first turn is still continued
+    translator, code = turn(request, emit, state, session, fresh)
+    if not fresh and translator.error and not translator.printed and session_gone(translator.error):
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): start a new one.
+        emit.log(f"Grok Build could not resume session {session}; starting a new one")
+        state.clear("session")
+        session = str(uuid.uuid4())
+        state.set("session", session)
+        translator, code = turn(request, emit, state, session, True)
+    translator.flush()
+    translator.terminal()
+    if translator.end is None and translator.error is None:
+        emit.failed("cli_exit", f"Grok Build exited with code {code} without a result.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Installs Oh My Pi (omp) at a pinned version under $HG_HARNESS/tools, by its makers' documented method
+# (Bun's global install of @oh-my-pi/pi-coding-agent). Bun itself comes from npm, so no download step of an
+# install script is needed beyond the one that places npm's optional platform package.
+set -eu
+VERSION=18.22.2
+BUN_VERSION=1.4.4
+
+for need in node npm; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: installing omp needs Node.js and npm" >&2
+    exit 1
+  }
+done
+
+TOOLS=$HG_HARNESS/tools
+mkdir -p "$TOOLS"
+
+# Bun's npm package picks the build for this machine through its optional dependencies. npm 12 runs no
+# package's install script unless told to, so the one script that puts the binary in place is run by name.
+npm install --prefix "$TOOLS" --no-audit --no-fund --loglevel=error --ignore-scripts "bun@$BUN_VERSION"
+node "$TOOLS/node_modules/bun/install.js"
+BUN=$TOOLS/node_modules/.bin/bun
+[ -x "$BUN" ] || { echo "npm installed bun but left no executable at $BUN" >&2; exit 1; }
+
+# The CLI's documented install: Bun's global install, entirely under this harness's tools folder.
+BUN_INSTALL=$TOOLS/omp "$BUN" add -g "@oh-my-pi/pi-coding-agent@$VERSION" --no-summary 2>&1 \
+  || { echo "bun could not install @oh-my-pi/pi-coding-agent@$VERSION" >&2; exit 1; }
+
+CLI=$TOOLS/omp/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js
+[ -f "$CLI" ] || { echo "the install left no CLI at $CLI" >&2; exit 1; }
+
+got=$("$BUN" "$CLI" --version 2>/dev/null | sed -n 's#^omp/##p')
+[ "$got" = "$VERSION" ] || { echo "installed omp $got, wanted $VERSION" >&2; exit 1; }
+echo "omp $got installed"

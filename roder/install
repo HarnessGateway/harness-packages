@@ -1,0 +1,75 @@
+#!/bin/sh
+# Installs Roder at a pinned version under $HG_HARNESS/tools, the way its makers' install script does:
+# the release archive for this machine, verified against the release's SHA-256, then its `roder` binary.
+set -eu
+
+VERSION=0.4.10
+BASE_URL="https://github.com/RoderAI/roder/releases/download/roder/v${VERSION}"
+
+for need in curl tar awk uname find install; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: it is needed to install Roder from its release archive" >&2
+    exit 1
+  }
+done
+
+# The package names no CPU architecture: the archive is chosen from this machine, as the makers' installer does.
+os=$(uname -s)
+case "$os" in
+  Linux) os_part=unknown-linux-gnu ;;
+  *)
+    echo "Roder publishes Linux release archives; this image runs $os" >&2
+    exit 1
+    ;;
+esac
+machine=$(uname -m)
+case "$machine" in
+  x86_64|amd64) arch_part=x86_64 ;;
+  aarch64|arm64) arch_part=aarch64 ;;
+  *)
+    echo "Roder publishes no release archive for this machine ($machine)" >&2
+    exit 1
+    ;;
+esac
+target="${arch_part}-${os_part}"
+
+tools="$HG_HARNESS/tools"
+mkdir -p "$tools"
+tmp="$tools/.install.$$"
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+archive="roder-${target}.tar.gz"
+echo "downloading Roder ${VERSION} for ${target}" >&2
+curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 "$BASE_URL/$archive" -o "$tmp/$archive"
+curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 "$BASE_URL/$archive.sha256" -o "$tmp/$archive.sha256"
+
+expected=$(awk '{print $1}' "$tmp/$archive.sha256")
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$tmp/$archive" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  actual=$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')
+else
+  echo "this image has neither sha256sum nor shasum: cannot verify the Roder archive" >&2
+  exit 1
+fi
+[ -n "$expected" ] && [ "$actual" = "$expected" ] || {
+  echo "Roder archive checksum mismatch (expected $expected, got $actual)" >&2
+  exit 1
+}
+
+mkdir -p "$tmp/extract"
+tar -xzf "$tmp/$archive" -C "$tmp/extract"
+binary=$(find "$tmp/extract" -type f -name roder | head -n 1)
+[ -n "$binary" ] || {
+  echo "the Roder release archive did not contain a roder binary" >&2
+  exit 1
+}
+install -m 0755 "$binary" "$tools/roder"
+
+got=$("$tools/roder" --version 2>/dev/null | awk '{print $2}')
+[ "$got" = "$VERSION" ] || {
+  echo "installed Roder ${got:-unknown}, wanted $VERSION" >&2
+  exit 1
+}
+echo "Roder $got installed"

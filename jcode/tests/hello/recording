@@ -1,0 +1,31 @@
+{"model":"deepseek-flash","provider":"Claude","session_id":"session_panda_1795005692935_9fd8887992de195d","type":"start"}
+{"connection":"https/sse","type":"connection_type"}
+{"phase":"sending request","type":"connection_phase"}
+{"phase":"waiting for response","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"phase":"streaming","type":"connection_phase"}
+{"text":"Hello","type":"text_delta"}
+{"text":"!","type":"text_delta"}
+{"text":" 👋","type":"text_delta"}
+{"text":"\n\n","type":"text_delta"}
+{"text":"I","type":"text_delta"}
+{"text":"'m","type":"text_delta"}
+{"text":" J","type":"text_delta"}
+{"text":"code","type":"text_delta"}
+{"text":",","type":"text_delta"}
+{"text":" ready","type":"text_delta"}
+{"text":" to","type":"text_delta"}
+{"text":" help","type":"text_delta"}
+{"text":".","type":"text_delta"}
+{"text":" What","type":"text_delta"}
+{"text":" would","type":"text_delta"}
+{"text":" you","type":"text_delta"}
+{"text":" like","type":"text_delta"}
+{"text":" to","type":"text_delta"}
+{"text":" work","type":"text_delta"}
+{"text":" on","type":"text_delta"}
+{"text":"?","type":"text_delta"}
+{"stop_reason":"end_turn","type":"message_end"}
+{"cache_creation_input":0,"cache_read_input":9216,"input":303,"output":23,"type":"tokens"}
+{"cache_creation_input":0,"cache_read_input":9216,"input":303,"output":23,"type":"tokens"}
+{"connection_phase":"streaming","connection_type":"https/sse","model":"deepseek-flash","provider":"Claude","reported_service_tier":null,"requested_service_tier":null,"served_service_tier":null,"service_tier_report_status":"not_reported","session_id":"session_panda_1795005692935_9fd8887992de195d","status_detail":null,"text":"Hello! 👋\n\nI'm Jcode, ready to help. What would you like to work on?","type":"done","upstream_provider":null,"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":9216,"input_tokens":303,"output_tokens":23}}

@@ -1,0 +1,42 @@
+#!/bin/sh
+# Installs Mistral Vibe at a pinned version under $HG_HARNESS/tools, by its makers' documented method:
+# `uv tool install mistral-vibe`.
+set -eu
+VERSION=3.1.3
+UV_VERSION=0.13.9
+
+# Vibe's makers build for Python 3.12 to 3.14; uv's newer Python versions have no wheels for some of its
+# native dependencies yet. Take the newest such interpreter the image has, rather than whatever python3 is.
+python=
+for candidate in python3.14 python3.13 python3.12 python3; do
+  found=$(command -v "$candidate" 2>/dev/null) || continue
+  if "$found" -c 'import sys; sys.exit(not (3, 12) <= sys.version_info[:2] < (3, 15))' 2>/dev/null; then
+    python=$found
+    break
+  fi
+done
+[ -n "$python" ] || {
+  echo "this image has no Python 3.12 to 3.14; Mistral Vibe 3.1.3 needs one of those (3.14 preferred)" >&2
+  exit 1
+}
+
+# uv is the CLI's documented installer. It gets a Python environment of its own under tools, so nothing is
+# installed into the image's Python, and it is pinned like the CLI.
+"$python" -m venv "$HG_HARNESS/tools/uv" || {
+  echo "$python cannot make a virtual environment: this image needs its venv module" >&2
+  exit 1
+}
+"$HG_HARNESS/tools/uv/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir "uv==$UV_VERSION"
+
+mkdir -p "$HG_HARNESS/tools/bin" "$HG_HARNESS/tools/env"
+cache="${TMPDIR:-/tmp}/vibe-uv-cache.$$"
+UV_TOOL_DIR="$HG_HARNESS/tools/env" \
+UV_TOOL_BIN_DIR="$HG_HARNESS/tools/bin" \
+UV_CACHE_DIR="$cache" \
+  "$HG_HARNESS/tools/uv/bin/uv" tool install --quiet --compile-bytecode --python "$python" \
+    "mistral-vibe==$VERSION"
+rm -rf "$cache"
+
+got=$("$HG_HARNESS/tools/bin/vibe" --version | awk '{print $2}')
+[ "$got" = "$VERSION" ] || { echo "installed Mistral Vibe $got, wanted $VERSION" >&2; exit 1; }
+echo "Mistral Vibe $got installed"

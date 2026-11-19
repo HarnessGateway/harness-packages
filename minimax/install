@@ -1,0 +1,42 @@
+#!/bin/sh
+# Installs MiniMax Code (the mcode CLI) at a pinned version under $HG_HARNESS/tools, from npm.
+set -eu
+
+VERSION=0.7.7
+TOOLS="$HG_HARNESS/tools"
+
+for need in node npm python3; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: MiniMax Code needs Node.js 22.19+ (22) or 24-26, npm, and this package's run needs python3" >&2
+    exit 1
+  }
+done
+
+node -e '
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (!((major === 22 && minor >= 19) || (major >= 24 && major < 27))) {
+  console.error(`this image has Node.js ${process.versions.node}: MiniMax Code needs 22.19+ on 22, or 24 through 26`);
+  process.exit(1);
+}
+'
+
+# npm 12 runs no package's install script unless told to; earlier npm runs every one. The CLI needs no
+# script of its own, but its optional native dependency better-sqlite3 does: its prebuilt binary is put
+# in place here, by name, and nothing else runs.
+npm install --prefix "$TOOLS" --no-audit --no-fund --loglevel=error --ignore-scripts \
+  "@minimax-ai/code@$VERSION"
+
+BETTER_SQLITE3="$TOOLS/node_modules/better-sqlite3"
+if [ -d "$BETTER_SQLITE3" ]; then
+  ( cd "$BETTER_SQLITE3" && "$TOOLS/node_modules/.bin/prebuild-install" ) || {
+    echo "could not download the prebuilt SQLite module MiniMax Code needs (better-sqlite3 $VERSION)" >&2
+    exit 1
+  }
+fi
+
+# The CLI's own postinstall checks that the native pieces it ships with are in place.
+node "$TOOLS/node_modules/@minimax-ai/code/verify-native-install.mjs"
+
+got=$("$TOOLS/node_modules/.bin/mcode" --version | awk 'NR == 1 {print $1}')
+[ "$got" = "$VERSION" ] || { echo "installed MiniMax Code $got, wanted $VERSION" >&2; exit 1; }
+echo "MiniMax Code $got installed"

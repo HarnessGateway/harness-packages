@@ -1,0 +1,27 @@
+#!/bin/sh
+# Installs CheetahClaws at a pinned version under $HG_HARNESS/tools, by its makers' documented method (pip).
+set -eu
+VERSION=3.5.90
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "this image has no python3: CheetahClaws needs Python 3.10 or later" >&2
+  exit 1
+}
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || {
+  echo "this image's python3 is older than 3.10, which CheetahClaws needs" >&2
+  exit 1
+}
+python3 -m venv --help >/dev/null 2>&1 || {
+  echo "this image's python3 has no venv module: CheetahClaws is installed into an environment of its own" >&2
+  exit 1
+}
+
+# A virtual environment of its own keeps CheetahClaws and its dependencies under $HG_HARNESS/tools, where a
+# read-only install can serve them to every session. pip picks the wheel for this machine; nothing here names one.
+python3 -m venv "$HG_HARNESS/tools/venv"
+"$HG_HARNESS/tools/venv/bin/pip" install --quiet --no-input --disable-pip-version-check \
+  "cheetahclaws==$VERSION"
+
+got=$("$HG_HARNESS/tools/venv/bin/cheetahclaws" --version | awk '{print $NF}' | sed 's/^v//')
+[ "$got" = "$VERSION" ] || { echo "installed CheetahClaws $got, wanted $VERSION" >&2; exit 1; }
+echo "CheetahClaws $got installed"

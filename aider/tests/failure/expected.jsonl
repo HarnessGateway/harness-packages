@@ -1,0 +1,5 @@
+{"type": "hg.log", "text": "litellm.BadRequestError: AnthropicException - "}
+{"type": "hg.log", "text": "b'{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The "}
+{"type": "hg.log", "text": "supported API model names are deepseek-flash, deepseek-v4-pro, but you passed "}
+{"type": "hg.log", "text": "no-such-model. (request_id: 289b8122-6edc-4029-ab4e-730fcdc2eb7a)\"}}'"}
+{"type": "hg.failed", "code": "provider_error", "message": "litellm.BadRequestError: AnthropicException - \nb'{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The \nsupported API model names are deepseek-flash, deepseek-v4-pro, but you passed \nno-such-model. (request_id: 289b8122-6edc-4029-ab4e-730fcdc2eb7a)\"}}'"}

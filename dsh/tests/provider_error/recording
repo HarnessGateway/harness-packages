@@ -1,0 +1,6 @@
+{"type":"session","sessionId":"session-efe2f3e5-41a8-4629-9c57-ac173579b188","cwd":"/work/.trial/dsh/work"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"status","phase":"step_end","turn":1,"step":1}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 568c3283-052e-483c-aa02-32a2e38d2f2e)","code":"INVALID_REQUEST","status":400}}}
+{"type":"final","sessionId":"session-efe2f3e5-41a8-4629-9c57-ac173579b188","reason":{"kind":"error","error":{"message":"The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 568c3283-052e-483c-aa02-32a2e38d2f2e)","code":"INVALID_REQUEST","status":400}},"text":""}

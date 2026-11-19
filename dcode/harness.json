@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "name": "dcode",
+  "version": "0.2.10-1",
+  "description": "Deep Agents Code, unmodified.",
+  "mind": ".deepagents",
+  "apis": ["anthropic", "openai-chat", "openai-responses", "gemini"],
+  "install": { "timeout_s": 1800 },
+  "run": { "stop_grace_s": 15 }
+}

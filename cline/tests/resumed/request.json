@@ -1,0 +1,4 @@
+{
+  "model": "builder/cline/deepseek/deepseek-flash",
+  "input": "What did the program print?"
+}

@@ -1,0 +1,51 @@
+#!/bin/sh
+# Installs J-Code at a pinned version under $HG_HARNESS/tools by its makers' own
+# installer, which picks the build for this machine and checks the release's
+# SHA-256. The installer is fetched from the jcode repository at the pinned tag.
+set -eu
+
+VERSION=1.0.0
+TAG=v$VERSION
+URL=https://raw.githubusercontent.com/1jehuang/jcode/$TAG/scripts/install.sh
+# sha256 of scripts/install.sh at tag v1.0.0
+DIGEST=b035c2634dcd78796ad0f33fd15a1686255ea192c2dcb20a8c54bf6a7ab7b3b0
+
+for need in bash curl tar python3 sha256sum; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: jcode's installer needs bash, curl, tar and sha256sum, and this package's run needs python3" >&2
+    exit 1
+  }
+done
+
+TOOLS="$HG_HARNESS/tools"
+mkdir -p "$TOOLS/bin"
+
+script="$TOOLS/install-jcode.sh"
+curl -fsSL --retry 3 --connect-timeout 10 "$URL" -o "$script" || {
+  echo "could not download jcode's installer from $URL" >&2
+  exit 1
+}
+printf '%s  %s\n' "$DIGEST" "$script" | sha256sum -c - >/dev/null 2>&1 || {
+  echo "jcode's installer at $TAG did not match its pinned SHA-256" >&2
+  exit 1
+}
+
+# The installer writes its version store and launcher under $HOME and
+# $JCODE_INSTALL_DIR; point both inside tools so the install writes nowhere else.
+# It also checks for updates, reports telemetry and reloads a running server:
+# none of those belongs in an image install.
+HOME="$TOOLS" \
+JCODE_INSTALL_DIR="$TOOLS/bin" \
+JCODE_VERSION="$TAG" \
+JCODE_RELEASE_METADATA_BASE="https://github.com/1jehuang/jcode/releases/download" \
+JCODE_SKIP_SERVER_RELOAD=1 \
+JCODE_NO_TELEMETRY=1 \
+DO_NOT_TRACK=1 \
+  bash "$script"
+
+got=$("$TOOLS/bin/jcode" --version 2>/dev/null | awk '{print $2}' | sed 's/^v//')
+[ "$got" = "$VERSION" ] || {
+  echo "installed jcode '${got:-nothing}', wanted $VERSION" >&2
+  exit 1
+}
+echo "jcode $got installed"

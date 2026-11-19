@@ -1,0 +1,1 @@
+{"type": "hg.failed", "code": "provider_error", "message": "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed no-such-model. (request_id: 5e8c1a18-996a-4fac-8ca9-8f58d76f102b)'}}"}

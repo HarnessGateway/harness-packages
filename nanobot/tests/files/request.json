@@ -1,0 +1,20 @@
+{
+  "model": "builder/nanobot/deepseek/deepseek-flash",
+  "instructions": "Be brief. Answer with the secret word only.",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Read the file given with this request and tell me the secret word it holds."
+        },
+        {
+          "type": "input_file",
+          "filename": "notes.txt",
+          "file_data": "cHJvamVjdCBjb2RlbmFtZTogbmlnaHRpbmdhbGUKc2VjcmV0IHdvcmQ6IHBsb3Zlcgo="
+        }
+      ]
+    }
+  ]
+}

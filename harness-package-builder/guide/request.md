@@ -42,6 +42,7 @@ A CLI that speaks several must be configured for the one it is given.
 | `anthropic` | Anthropic's base URL form: no `/v1` | `ANTHROPIC_BASE_URL`, and the key as `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` |
 | `openai-responses` | OpenAI's base URL form: ends in `/v1` | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, or a provider entry in the CLI's config |
 | `openai-chat` | The same | The same; many CLIs call this "OpenAI-compatible" |
+| `gemini` | Google's base URL form: no `/v1beta` | `GOOGLE_GEMINI_BASE_URL` and `GEMINI_API_KEY`, or the CLI's own names for them |
 
 The provider is rarely the CLI's maker. Turn off anything that assumes it is: sign-in, an update check, a
 model list fetched from the maker, telemetry. A turn that hangs on a host it cannot reach is almost always

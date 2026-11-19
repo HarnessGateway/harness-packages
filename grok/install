@@ -1,0 +1,39 @@
+#!/bin/sh
+# Installs Grok Build (xAI's grok CLI) at a pinned version under $HG_HARNESS/tools, by its makers' documented
+# method: their install.sh, run with an explicit version. The installer writes its download cache, completions and
+# shell snippets beneath a HOME of its own inside tools, so nothing lands outside $HG_HARNESS.
+set -eu
+VERSION=1.0.89
+
+for need in curl bash; do
+  command -v "$need" >/dev/null 2>&1 || {
+    echo "this image has no $need: Grok Build's installer needs curl and bash" >&2
+    exit 1
+  }
+done
+
+installer_home="$HG_HARNESS/tools/installer-home"
+bin="$HG_HARNESS/tools/bin"
+mkdir -p "$installer_home" "$bin"
+
+script="$installer_home/install.sh"
+curl -fsSL https://x.ai/cli/install.sh -o "$script" || {
+  echo "could not fetch Grok Build's installer from https://x.ai/cli/install.sh: this environment's setup must allow host x.ai" >&2
+  exit 1
+}
+
+# The pinned version is passed as the installer's one argument. GROK_BIN_DIR puts the binary under tools; HOME keeps
+# the installer's own writes (download, completions, config scratch) inside tools too.
+HOME="$installer_home" GROK_BIN_DIR="$bin" bash "$script" "$VERSION" || {
+  echo "Grok Build's installer failed; if the download was refused, this environment's setup must allow x.ai (and its fallback storage.googleapis.com)" >&2
+  exit 1
+}
+
+[ -x "$bin/grok" ] || { echo "the installer left no executable at $bin/grok" >&2; exit 1; }
+"$bin/grok" --version >/dev/null 2>&1 || {
+  echo "the Grok Build binary will not run on this image; it needs a glibc Linux system" >&2
+  exit 1
+}
+got=$("$bin/grok" --version 2>/dev/null | awk '{print $2}')
+[ "$got" = "$VERSION" ] || { echo "installed Grok Build $got, wanted $VERSION" >&2; exit 1; }
+echo "Grok Build $got installed"

@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+"""One turn of ZeroClaw, headless: drive its own ACP server (JSON-RPC 2.0 over stdio) and translate it.
+
+ZeroClaw's `agent -m` single-message mode prints prose for a person. Its ACP server is the machine-readable
+face its makers ship: session/new, session/resume, session/prompt, and `session/update` notifications for
+streamed text, reasoning and tool calls. This package speaks that protocol, one prompt per turn.
+"""
+
+import json
+import os
+import queue
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+CLI = os.path.join(os.environ["HG_HARNESS"], "tools", "bin", "zeroclaw")
+HOME = os.environ["HOME"]
+CONFIG_DIR = os.path.join(HOME, ".zeroclaw")
+DIFF_MAX = 100_000
+EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+_PROCESS = None
+
+
+# ── the configuration ZeroClaw is given ────────────────────────────────────────────────────────────────────
+
+
+def toml(value):
+    """A TOML basic string: JSON's escaping is TOML's for every value written here."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def provider_family():
+    """The provider slot of the API this turn speaks, and the extra fields that slot needs."""
+    api = os.environ.get("HG_PROVIDER_API", "")
+    if api == "anthropic":
+        return "anthropic", []
+    if api == "openai-responses":
+        return "openai", ['wire_api = "responses"']
+    if api == "openai-chat":
+        return "openai", ['wire_api = "chat_completions"']
+    raise ValueError(f"ZeroClaw has no provider slot for the {api or 'empty'} API")
+
+
+def config_text(request):
+    family, extra = provider_family()
+    url = os.environ["HG_PROVIDER_URL"].rstrip("/")
+    model = os.environ["HG_MODEL"]
+    body = request.body if isinstance(request.body, dict) else {}
+
+    lines = ["schema_version = 4", ""]
+    lines += [f"[providers.models.{family}.hg]",
+              f"uri = {toml(url)}",
+              f"model = {toml(model)}"]
+    if isinstance(body.get("max_output_tokens"), int) and body["max_output_tokens"] > 0:
+        lines.append(f"max_tokens = {body['max_output_tokens']}")
+    if isinstance(body.get("temperature"), (int, float)):
+        lines.append(f"temperature = {body['temperature']}")
+    lines += extra
+    lines.append("")
+
+    bundles = []
+    servers = [server for server in request.mcp_servers
+               if isinstance(server, dict) and server.get("server_label") and server.get("server_url")]
+    if servers:
+        bundles = ["request"]
+        for server in servers:
+            lines += ["[[mcp.servers]]",
+                      f"name = {toml(server['server_label'])}",
+                      'transport = "http"',
+                      f"url = {toml(server['server_url'])}"]
+            headers = server.get("headers")
+            if isinstance(headers, dict) and headers:
+                pairs = ", ".join(f"{toml(str(k))} = {toml(str(v))}" for k, v in headers.items())
+                lines.append(f"headers = {{ {pairs} }}")
+            lines.append("")
+        lines += ["[mcp_bundles.request]",
+                  "servers = [" + ", ".join(toml(server["server_label"]) for server in servers) + "]",
+                  ""]
+
+    lines += ["[agents.zeroclaw]",
+              "enabled = true",
+              f'model_provider = "{family}.hg"',
+              'risk_profile = "unattended"',
+              'runtime_profile = "unattended"']
+    if bundles:
+        lines.append("acp_enable_mcp = true")
+        lines.append("mcp_bundles = [" + ", ".join(toml(bundle) for bundle in bundles) + "]")
+    lines.append("")
+
+    # Headless: there is no operator to answer an approval prompt, so the CLI runs at its `full` autonomy
+    # level. The platform's sandbox, not ZeroClaw's own gates, is the boundary around this turn.
+    lines += ["[risk_profiles.unattended]",
+              'level = "full"',
+              "workspace_only = false",
+              "sandbox_enabled = false",
+              "block_high_risk_commands = false",
+              "require_approval_for_medium_risk = false",
+              'allowed_commands = ["*"]',
+              "forbidden_paths = []",
+              "",
+              "[runtime_profiles.unattended]",
+              ""]
+
+    effort = request.effort
+    if effort in EFFORTS:
+        lines += ["[runtime]", f"reasoning_effort = {toml(effort)}", ""]
+    return "\n".join(lines)
+
+
+def write_config(request):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    path = os.path.join(CONFIG_DIR, "config.toml")
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as file:
+        file.write(config_text(request))
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def environment(family):
+    """ZeroClaw is told its provider through the config, and its key through an environment override so the
+    placeholder is never written to a file."""
+    env = dict(os.environ)
+    env["ZEROCLAW_providers__models__" + family + "__hg__api_key"] = os.environ["HG_PROVIDER_KEY"]
+    return env
+
+
+# ── reading the CLI's answers ──────────────────────────────────────────────────────────────────────────────
+
+
+class CliGone(Exception):
+    """The ACP server stopped before it answered."""
+
+
+class Acp:
+    """`zeroclaw acp`: newline-delimited JSON-RPC 2.0 on stdin and stdout."""
+
+    def __init__(self, env, record=None):
+        self._record = record
+        self._queue = queue.Queue()
+        self._next_id = 0
+        self.process = subprocess.Popen(  # noqa: S603 - the command is this package's own
+            [CLI, "--config-dir", CONFIG_DIR, "acp", "--agent", "zeroclaw"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True,
+        )
+        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._pump_errors, daemon=True).start()
+
+    def _pump(self):
+        for line in self.process.stdout:
+            if self._record is not None:
+                self._record.write(line)
+                self._record.flush()
+            self._queue.put(line.rstrip("\n"))
+        self._queue.put(None)
+
+    def _pump_errors(self):
+        # The CLI's standard error is the turn's log: the platform keeps it, the caller never sees it.
+        for line in self.process.stderr:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+    def read(self, timeout=None):
+        """The next line, or None at end of output; raises CliGone on a timeout."""
+        try:
+            line = self._queue.get(timeout=timeout)
+        except queue.Empty:
+            raise CliGone("ZeroClaw did not answer in time") from None
+        return line
+
+    def send(self, method, params=None):
+        self._next_id += 1
+        message = {"jsonrpc": "2.0", "id": self._next_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        self.process.stdin.write(json.dumps(message) + "\n")
+        self.process.stdin.flush()
+        return self._next_id
+
+    def answer(self, message):
+        """Allow a tool the CLI asks about. There is no operator in a headless turn."""
+        result = {"outcome": {"outcome": "selected", "optionId": "allow-once"}}
+        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\n")
+        self.process.stdin.flush()
+
+    def wait(self, wanted, translator):
+        """Read until the answer with `wanted`'s id; handle whatever arrives first."""
+        while True:
+            raw = self.read(180)
+            if raw is None:
+                raise CliGone("ZeroClaw closed its output before answering")
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                translator.emit.log(f"ZeroClaw's non-JSON output: {raw[:500]}")
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("id") == wanted and ("result" in message or "error" in message):
+                return message
+            translator.aside(message)
+
+    def close(self):
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        return self.process.returncode
+
+
+def text_of(update):
+    """What a tool call printed, from the shapes ACP gives it."""
+    for name in ("rawOutput", "body"):
+        value = update.get(name)
+        if isinstance(value, str):
+            return value
+        if value is not None:
+            return json.dumps(value, ensure_ascii=False)
+    parts = []
+    for block in update.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        inner = block.get("content") if isinstance(block.get("content"), dict) else block
+        if isinstance(inner.get("text"), str):
+            parts.append(inner["text"])
+    return "\n".join(parts)
+
+
+def lines_of(text, mark):
+    if not isinstance(text, str):
+        return ""
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())[:DIFF_MAX]
+
+
+class Translator:
+    """ZeroClaw's ACP updates in, Responses events out."""
+
+    def __init__(self, emit, state):
+        self.emit = emit
+        self.state = state
+        self.calls = {}
+        self.emitted = False
+
+    def aside(self, message):
+        """A message that is not the one being waited for: a notification, or a request to answer."""
+        method = message.get("method")
+        if method == "session/update":
+            self.update((message.get("params") or {}).get("update") or {})
+        elif method == "session/request_permission":
+            # The run's client answers these outside the translator; a replay has no one to ask.
+            pass
+
+    def update(self, update):
+        if not isinstance(update, dict):
+            return
+        kind = update.get("sessionUpdate")
+        if kind in ("agent_message_chunk", "agent_thought_chunk"):
+            content = update.get("content") or {}
+            text = content.get("text") if isinstance(content, dict) else None
+            if isinstance(text, str) and text:
+                self.emitted = True
+                if kind == "agent_message_chunk":
+                    self.emit.say(text)
+                else:
+                    self.emit.think(text)
+        elif kind == "tool_call":
+            self.calls[update.get("toolCallId") or ""] = update
+        elif kind == "tool_call_update":
+            self.finish_call(update)
+
+    def finish_call(self, update):
+        status = update.get("status")
+        if status == "pending":
+            self.calls[update.get("toolCallId") or ""] = update
+            return
+        call = self.calls.pop(update.get("toolCallId") or "", {})
+        name = update.get("name") or call.get("name") or "tool"
+        given = update.get("rawInput") or call.get("rawInput") or {}
+        if not isinstance(given, dict):
+            given = {"input": given}
+        output = text_of(update)
+        # ACP calls every tool result "completed"; ZeroClaw marks a failed tool's text with this prefix.
+        failed = status in ("failed", "error") or bool(update.get("error")) or output.startswith("Error: ")
+
+        if name == "shell":
+            command = given.get("command") or update.get("title") or call.get("title") or "shell"
+            # ZeroClaw prefixes a failed tool's text with "Error: "; ACP carries no exit code, so a failed
+            # command is reported as exit 1. Its text is `<stderr>\n\n\n<stdout>` when both were captured.
+            if output.startswith("Error: "):
+                failed = True
+                detail = output[len("Error: "):]
+                stderr, separator, stdout = detail.partition("\n\n\n")
+                if not separator:
+                    stderr, stdout = detail, ""
+            else:
+                stderr, stdout = "", output
+            self.emitted = True
+            if failed:
+                self.emit.ran(str(command), stdout=stdout, stderr=stderr or output, exit_code=1)
+            else:
+                self.emit.ran(str(command), stdout=stdout, exit_code=0)
+        elif name == "file_write" and not failed:
+            self.emitted = True
+            self.emit.wrote(str(given.get("path", "")), lines_of(given.get("newText", ""), "+"))
+        elif name == "file_edit" and not failed:
+            self.emitted = True
+            diff = lines_of(given.get("oldText", ""), "-") + lines_of(given.get("newText", ""), "+")
+            self.emit.edited(str(given.get("path", "")), diff)
+        elif name in ("file_delete", "file_remove") and not failed:
+            self.emitted = True
+            self.emit.deleted(str(given.get("path", "")))
+        elif "__" in name:
+            server, _, tool = name.partition("__")
+            self.emitted = True
+            if failed:
+                self.emit.called(server, tool, given, error=output or "the tool failed")
+            else:
+                self.emit.called(server, tool, given, output=output)
+        else:
+            # A file tool that failed did not write anything: report the tool and what it said instead.
+            self.emitted = True
+            self.emit.used(name, json.dumps(given, ensure_ascii=False), output)
+
+    def flush_calls(self):
+        """A call the CLI opened but never closed: report it, so the caller sees what was attempted."""
+        for call in self.calls.values():
+            name = call.get("name") or "tool"
+            given = call.get("rawInput") or {}
+            self.emit.used(name, json.dumps(given if isinstance(given, dict) else {"input": given},
+                                            ensure_ascii=False), "")
+        self.calls.clear()
+
+
+# ── the end of the turn ────────────────────────────────────────────────────────────────────────────────────
+
+
+def costs_path():
+    return os.path.join(CONFIG_DIR, "data", "state", "costs.jsonl")
+
+
+def costs_offset():
+    try:
+        return os.path.getsize(costs_path())
+    except OSError:
+        return 0
+
+
+def usage_since(offset, session_id):
+    """ZeroClaw appends one record per model call to data/state/costs.jsonl, with input and output tokens and
+    cache hits. The turn's usage is the records appended while its prompt ran."""
+    path = costs_path()
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        try:
+            if os.path.getsize(path) > offset:
+                break
+        except OSError:
+            pass
+        time.sleep(0.05)
+    try:
+        with open(path, "rb") as file:
+            data = file.read()
+    except OSError:
+        return None
+    if offset > len(data):
+        offset = 0
+    spent_in = spent_out = spent_cached = 0
+    found = False
+    for line in data[offset:].decode("utf-8", "replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("conversation_id") not in (None, session_id, ""):
+            continue
+        usage = record.get("usage") or {}
+        if not isinstance(usage, dict):
+            continue
+        found = True
+        spent_in += int(usage.get("input_tokens") or 0)
+        spent_out += int(usage.get("output_tokens") or 0)
+        spent_cached += int(usage.get("cached_input_tokens") or 0)
+    if not found:
+        return None
+    return {"input_tokens": spent_in, "output_tokens": spent_out,
+            "input_tokens_details": {"cached_tokens": spent_cached}}
+
+
+def finish(stop_reason, usage, emit):
+    if stop_reason == "end_turn":
+        emit.done(usage)
+    elif stop_reason == "max_tokens":
+        emit.incomplete("max_output_tokens", usage)
+    elif stop_reason in ("refusal", "content_filter"):
+        emit.incomplete("content_filter", usage)
+    else:
+        emit.failed("turn_stopped", f"ZeroClaw stopped the turn with stopReason {stop_reason!r}.", usage)
+
+
+def failure_of(error, usage, emit):
+    if not isinstance(error, dict):
+        error = {"message": str(error)}
+    code = "provider_error" if "provider" in str(error.get("message", "")).lower() else "cli_error"
+    message = str(error.get("message") or "").strip() or "ZeroClaw reported an error with no message."
+    emit.failed(code, message[:2000], usage)
+
+
+# ── a turn ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def replay(path, emit, state):
+    """The platform's check gives the CLI's recorded output in its place; translate it the same way."""
+    translator = Translator(emit, state)
+    stopped, error, session = None, None, None
+    with open(path, encoding="utf-8", errors="replace") as file:
+        for raw in file:
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                translator.emit.log(f"ZeroClaw's non-JSON output: {raw.rstrip()[:500]}")
+                continue
+            if not isinstance(message, dict):
+                continue
+            result = message.get("result")
+            if isinstance(result, dict) and result.get("sessionId"):
+                session = result["sessionId"]
+            if "error" in message and message.get("id") is not None:
+                error = message["error"]
+            if isinstance(result, dict) and result.get("stopReason"):
+                stopped = result["stopReason"]
+            elif message.get("method"):
+                translator.aside(message)
+    if session:
+        state.set("session", session)
+    if error is not None:
+        failure_of(error, None, emit)
+    elif stopped is not None:
+        translator.flush_calls()
+        finish(stopped, None, emit)
+    else:
+        emit.failed("cli_exit", "The recorded ZeroClaw output ended without a prompt result.")
+
+
+def live_turn(request, emit, state):
+    hgkit.seed()
+    record_path = os.environ.get("HGKIT_RECORD")
+    record = open(record_path, "a", encoding="utf-8") if record_path else None  # noqa: SIM115 - closed below
+    try:
+        write_config(request)
+        family, _ = provider_family()
+        acp = Acp(environment(family), record=record)
+    except ValueError as error:
+        emit.failed("provider_api", str(error))
+        if record is not None:
+            record.close()
+        return
+    except OSError as error:
+        emit.failed("cli_exit", f"ZeroClaw could not be started: {error}")
+        if record is not None:
+            record.close()
+        return
+    global _PROCESS
+    _PROCESS = acp.process
+    translator = Translator(emit, state)
+    session = state.get("session")
+    usage = None
+    try:
+        acp.wait(acp.send("initialize"), translator)
+        if session:
+            answer = acp.wait(acp.send("session/resume", {"sessionId": session}), translator)
+            if "error" in answer:
+                said = answer["error"].get("message", "") if isinstance(answer["error"], dict) \
+                    else str(answer["error"])
+                emit.log(f"ZeroClaw could not resume session {session}: {said}; starting a new one")
+                state.clear("session")
+                session = None
+        if not session:
+            answer = acp.wait(acp.send("session/new", {"agentAlias": "zeroclaw", "cwd": os.environ["HG_WORK"]}),
+                              translator)
+            if "error" in answer:
+                failure_of(answer["error"], None, emit)
+                return
+            session = (answer.get("result") or {}).get("sessionId")
+            if not session:
+                emit.failed("cli_error", "ZeroClaw created a session without a session id.")
+                return
+            state.set("session", session)                       # saved the moment the CLI reports it
+
+        try:
+            prompt = request.brief()
+        except (OSError, ValueError) as error:
+            emit.failed("input_error", f"The request's files could not be prepared: {error}")
+            return
+        offset = costs_offset()
+        wanted = acp.send("session/prompt", {"sessionId": session, "prompt": prompt})
+        answer = None
+        while True:
+            raw = acp.read()
+            if raw is None:
+                break
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                emit.log(f"ZeroClaw's non-JSON output: {raw[:500]}")
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("id") == wanted and ("result" in message or "error" in message):
+                answer = message
+                break
+            if message.get("method") == "session/request_permission":
+                acp.answer(message)
+            else:
+                translator.aside(message)
+
+        if answer is None:
+            code = acp.process.poll()
+            translator.flush_calls()
+            emit.failed("cli_exit", f"ZeroClaw exited with code {code} before the turn finished.")
+            return
+        usage = usage_since(offset, session)
+        if "error" in answer:
+            translator.flush_calls()
+            failure_of(answer["error"], usage, emit)
+            return
+        translator.flush_calls()
+        finish((answer.get("result") or {}).get("stopReason"), usage, emit)
+    except CliGone as gone:
+        translator.flush_calls()
+        emit.failed("cli_exit", str(gone))
+    finally:
+        acp.close()
+        if record is not None:
+            record.close()
+
+
+def main():
+    emit = hgkit.Emitter()
+    try:
+        request, state = hgkit.Request(), hgkit.State()
+        recording = os.environ.get("HG_REPLAY")
+        if recording:
+            replay(recording, emit, state)
+        else:
+            live_turn(request, emit, state)
+    except Exception as error:  # noqa: BLE001 - a turn always ends with one line saying what happened
+        try:
+            emit.failed("harness_error", f"The turn could not be run: {error}")
+        except RuntimeError:
+            pass
+
+
+def _stopped(*_):
+    """The platform stopped the turn: stop the CLI and everything it started, and print no terminal line."""
+    process = _PROCESS
+    if process is not None and process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.time() + 5
+        while time.time() < deadline and process.poll() is None:
+            time.sleep(0.1)
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _stopped)
+    main()

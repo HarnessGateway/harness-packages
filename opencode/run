@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""One turn of OpenCode (the opencode CLI): start it headless, and say in Responses events what it does.
+
+OpenCode prints one JSON object per line (`run --format json`): a step start, its answer text and reasoning
+as each is finished, each completed or failed tool call, a step finish with the token counts, and an error
+when the turn fails. Its own session id is on every line.
+"""
+
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.environ["HG_HARNESS"], "kit"))
+
+import hgkit  # noqa: E402 - the kit is found through the path set above
+
+OPENCODE = os.path.join(os.environ["HG_HARNESS"], "tools", "opencode", "node_modules", ".bin", "opencode")
+CONFIG_HOME = os.path.join(os.environ["HG_HARNESS"], "tools", "opencode-xdg")
+PROVIDER_ID = "harnessgateway"
+DIFF_MAX = 100_000
+
+
+def provider_base(api, url):
+    """The base URL OpenCode's AI SDK provider expects for this API."""
+    url = url.rstrip("/")
+    if api == "anthropic" and not url.endswith("/v1"):
+        return url + "/v1"                     # the platform's Anthropic URL has no /v1; the SDK's does
+    return url                                 # openai-chat's already ends in /v1
+
+
+def config(request):
+    """The OpenCode configuration for this turn: one custom provider and the request's model and MCP servers."""
+    api = request.provider.api or "openai-chat"
+    package = {
+        "anthropic": "@ai-sdk/anthropic",
+        "openai-chat": "@ai-sdk/openai-compatible",
+    }.get(api, "@ai-sdk/openai-compatible")
+    model = request.model
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": f"{PROVIDER_ID}/{model}",
+        "small_model": f"{PROVIDER_ID}/{model}",   # its title generator must ask for a model that exists too
+        "provider": {
+            PROVIDER_ID: {
+                "npm": package,
+                "name": "HarnessGateway",
+                "options": {
+                    "baseURL": provider_base(api, request.provider.url),
+                    "apiKey": request.provider.key,    # a placeholder: the platform's proxy puts the real one in
+                },
+                "models": {
+                    model: {"name": model, "tool_call": True, "attachment": True},
+                },
+            },
+        },
+        "autoupdate": False,
+        "share": "disabled",
+    }
+    servers = {}
+    for server in request.mcp_servers:
+        label, url = server.get("server_label"), server.get("server_url")
+        if not label or not url:
+            continue
+        remote = {"type": "remote", "url": url, "enabled": True}
+        if server.get("headers"):
+            remote["headers"] = server["headers"]
+        servers[label] = remote
+    if servers:
+        config["mcp"] = servers
+    return config
+
+
+def environment(request):
+    """OpenCode is told its provider through the config above and this environment."""
+    env = dict(os.environ)
+    env.update({
+        "XDG_CONFIG_HOME": CONFIG_HOME,            # the pre-installed plugin lives here; nothing is fetched
+        "OPENCODE_CONFIG_CONTENT": json.dumps(config(request)),
+        "OPENCODE_DISABLE_AUTOUPDATE": "1",
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",      # models.dev is not a host a turn may rely on
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",   # its start-up plugin is pre-installed, not downloaded
+        "npm_config_cache": "/tmp/opencode-npm-cache",  # npm's cache, when the agent runs npm, is not the mind
+    })
+    return env
+
+
+def command(request, session):
+    args = [OPENCODE, "run", "--format", "json", "--thinking", "--auto",
+            "-m", f"{PROVIDER_ID}/{request.model}"]
+    if session:
+        args += ["--session", session]
+    args.append(request.brief())
+    return args
+
+
+def lines_of(text, mark):
+    return "".join(f"{mark}{line}\n" for line in text.splitlines())
+
+
+class Translator:
+    """OpenCode's lines in, Responses events out."""
+
+    def __init__(self, emit, state, request):
+        self.emit = emit
+        self.state = state
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 0}}
+        self.steps = 0
+        self.finish = None
+        self.error = None
+        self.events = 0
+        labels = (server.get("server_label") for server in request.mcp_servers if server.get("server_label"))
+        # OpenCode puts the server's name in the tool's; it folds a name it cannot use into one it can.
+        self.servers = sorted({name for label in labels for name in (label, re.sub(r"[^A-Za-z0-9_]", "_", label))},
+                              key=len, reverse=True)
+
+    def read(self, line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return self.emit.log(line)                                  # not JSON: something it printed aside
+        if not isinstance(event, dict):
+            return self.emit.log(line)
+        session = event.get("sessionID")
+        if session:
+            self.state.set("session", session)                          # at once: a stopped turn must continue
+        kind = event.get("type")
+        part = event.get("part") or {}
+        if kind == "text":
+            self.events += 1
+            self.emit.say(part.get("text", ""))
+        elif kind == "reasoning":
+            self.events += 1
+            self.emit.think(part.get("text", ""))
+        elif kind == "tool_use":
+            self.events += 1
+            self.tool(part)
+        elif kind == "step_finish":
+            self.events += 1
+            self.step(part)
+        elif kind == "error":
+            self.events += 1
+            self.error = message_of(event.get("error")) or "OpenCode reported an error"
+        elif kind == "step_start":
+            pass
+        else:
+            self.emit.log(line)                                         # a line this package does not know
+
+    def tool(self, part):
+        name = part.get("tool") or ""
+        state = part.get("state") or {}
+        failed = state.get("status") == "error"
+        given = state.get("input") or {}
+        output = state.get("output") or ""
+        error = state.get("error") if failed else None
+        metadata = state.get("metadata") or {}
+
+        if name == "bash":
+            stdout = metadata.get("output")
+            if not isinstance(stdout, str):
+                stdout = output
+            code = metadata.get("exit")
+            if not isinstance(code, int):
+                code = 1 if failed else 0
+            stderr = error or ""
+            if failed and not stderr:
+                stderr, stdout = stdout, ""
+            self.emit.ran(given.get("command", ""), stdout=stdout, stderr=stderr, exit_code=code)
+        elif name == "write" and not failed:
+            self.emit.wrote(path_of(given), lines_of(given.get("content", ""), "+")[:DIFF_MAX])
+        elif name == "edit" and not failed:
+            diff = lines_of(given.get("oldString", ""), "-") + lines_of(given.get("newString", ""), "+")
+            self.emit.edited(path_of(given), diff[:DIFF_MAX])
+        elif name in ("apply_patch", "patch") and not failed and self.patch(given):
+            pass
+        elif self.mcp(name, given, output, error):
+            pass
+        else:
+            self.emit.used(name or "tool", json.dumps(given), error if failed else output)
+
+    def patch(self, given):
+        """A patch's per-file sections, as the file operations they are. False when it cannot be read."""
+        text = given.get("patchText") or given.get("patch") or ""
+        if not isinstance(text, str) or not text:
+            return False
+        sections, current = [], None
+        for line in text.splitlines():
+            if line.startswith("*** Add File: "):
+                current = ["create", line[len("*** Add File: "):].strip(), []]
+                sections.append(current)
+            elif line.startswith("*** Update File: "):
+                current = ["update", line[len("*** Update File: "):].strip(), []]
+                sections.append(current)
+            elif line.startswith("*** Delete File: "):
+                current = ["delete", line[len("*** Delete File: "):].strip(), []]
+                sections.append(current)
+            elif line.startswith("*** Move to: ") and current is not None:
+                current[1] = line[len("*** Move to: "):].strip()
+            elif line.startswith("*** "):
+                current = None
+            elif current is not None and (line.startswith("+") or line.startswith("-")):
+                current[2].append(line)
+        if not sections or any(not path for _, path, _ in sections):
+            return False
+        for operation, path, diff in sections:
+            if operation == "create":
+                self.emit.wrote(path, ("".join(f"{line}\n" for line in diff))[:DIFF_MAX])
+            elif operation == "update":
+                self.emit.edited(path, ("".join(f"{line}\n" for line in diff))[:DIFF_MAX])
+            else:
+                self.emit.deleted(path)
+        return True
+
+    def mcp(self, name, given, output, error):
+        """An MCP tool's name is its server's label and the tool's, joined by '_' or '__'."""
+        for server in self.servers:
+            for joiner in ("__", "_"):
+                prefix = server + joiner
+                if name.startswith(prefix) and len(name) > len(prefix):
+                    self.emit.called(server, name[len(prefix):], given,
+                                     output=None if error else output, error=error)
+                    return True
+        return False
+
+    def step(self, part):
+        tokens = part.get("tokens") or {}
+        cached = (tokens.get("cache") or {})
+        self.steps += 1
+        self.usage["input_tokens"] += int(tokens.get("input") or 0) + int(cached.get("read") or 0) \
+            + int(cached.get("write") or 0)
+        self.usage["output_tokens"] += int(tokens.get("output") or 0)
+        self.usage["input_tokens_details"]["cached_tokens"] += int(cached.get("read") or 0)
+        self.finish = part.get("reason")
+
+    def ending(self):
+        usage = self.usage if self.steps else None
+        if self.error:
+            self.emit.failed("provider_error", self.error[:2000], usage)
+        elif self.finish in ("length", "max_tokens"):
+            self.emit.incomplete("max_output_tokens", usage)
+        elif self.finish in ("content-filter", "content_filter"):
+            self.emit.incomplete("content_filter", usage)
+        else:
+            self.emit.done(usage)
+
+
+def path_of(given):
+    return given.get("filePath") or given.get("path") or given.get("file") or ""
+
+
+def message_of(error):
+    """The readable message of an OpenCode error object, in any of the shapes it reports."""
+    if isinstance(error, str):
+        return error
+    if not isinstance(error, dict):
+        return ""
+    data = error.get("data")
+    if isinstance(data, dict):
+        for key in ("message", "error", "responseBody"):
+            if isinstance(data.get(key), str) and data[key]:
+                return data[key]
+    for key in ("message", "error", "name"):
+        if isinstance(error.get(key), str) and error[key]:
+            return error[key]
+    return json.dumps(error)[:2000]
+
+
+def turn(request, emit, state, session):
+    """Run the CLI once. Returns its translator and its exit code."""
+    cli = hgkit.Cli(command(request, session), env=environment(request))
+    translator = Translator(emit, state, request)
+    for line in cli.lines():
+        translator.read(line)
+    return translator, cli.exit_code
+
+
+def main():
+    request, emit, state = hgkit.Request(), hgkit.Emitter(), hgkit.State()
+    session = state.get("session")
+    translator, code = turn(request, emit, state, session)
+    if session and translator.events == 0 and code != 0:
+        # Its own record of the session is gone or unusable (a stopped turn can leave it so): start a new one.
+        emit.log(f"OpenCode could not resume session {session} (exit code {code}); starting a new one")
+        state.clear("session")
+        translator, code = turn(request, emit, state, None)
+    if translator.error:
+        translator.ending()
+    elif translator.events == 0:
+        emit.failed("cli_exit", f"OpenCode exited with code {code} without reporting anything.")
+    elif code != 0:
+        emit.failed("cli_exit", f"OpenCode exited with code {code} before finishing its turn.")
+    else:
+        translator.ending()
+
+
+if __name__ == "__main__":
+    main()
